@@ -16,8 +16,9 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from agent_visor import chat
 from agent_visor.cli import default_session
-from agent_visor.storage import Store, signature
+from agent_visor.storage import Store, page_count, signature
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -100,11 +101,136 @@ class StorageTests(unittest.TestCase):
             self.store.ingest([str(self.source)], " ")
         self.assertEqual(self.store.history(), [])
 
+    def make_pdf(self, colors, name="deck.pdf"):
+        path = self.directory / name
+        pages = [Image.new("RGB", (160, 90), color) for color in colors]
+        pages[0].save(path, save_all=True, append_images=pages[1:])
+        return path
+
+    def test_pdf_becomes_one_deck_in_page_order(self):
+        pdf = self.make_pdf(["red", "lime", "blue"])
+        self.assertEqual(page_count(pdf), 3)
+        items = self.store.ingest([str(pdf), str(self.source)], "talk", caption="Charla")
+        self.assertEqual(len(items), 4)
+        deck = items[0]["deck"]
+        self.assertTrue(deck)
+        self.assertEqual([(i["page"], i["pages"], i["title"]) for i in items[:3]], [(1, 3, "deck"), (2, 3, "deck"), (3, 3, "deck")])
+        self.assertIsNone(items[3]["deck"])
+        pages = self.store.deck_pages(deck)
+        with Image.open(pages[1]["snapshot"]) as image:
+            self.assertEqual(max(image.size), 2400)
+            red, green, blue, _ = image.getpixel((image.width // 2, image.height // 2))
+            self.assertGreater(green, 200)
+            self.assertLess(red + blue, 60)
+        collapsed = self.store.history("talk", collapse=True)
+        self.assertEqual([(i["deck"], i["page"]) for i in collapsed], [(None, None), (deck, 1)])
+        self.assertEqual(len(self.store.history("talk")), 4)
+        self.assertEqual(self.store.latest_for_source("talk", str(pdf)), deck)
+
+    def test_deck_flag_joins_images_under_first_title(self):
+        other = self.directory / "second.png"
+        Image.new("RGB", (50, 50), "white").save(other)
+        items = self.store.ingest([str(self.source), str(other)], "talk", deck=True)
+        self.assertEqual(len({i["deck"] for i in items}), 1)
+        self.assertEqual([i["page"] for i in items], [1, 2])
+        self.assertEqual({i["title"] for i in items}, {"with spaces ñ"})
+        self.assertEqual(len(self.store.history("talk", collapse=True)), 1)
+
+    def test_bad_pdf_and_page_limit_roll_back(self):
+        broken = self.directory / "broken.pdf"
+        broken.write_bytes(b"%PDF-1.4 not really")
+        with self.assertRaises(ValueError):
+            page_count(broken)
+        with self.assertRaises(ValueError):
+            self.store.ingest([str(self.source), str(broken)], "talk")
+        with patch("agent_visor.storage.MAX_PAGES", 2):
+            with self.assertRaises(ValueError):
+                self.store.ingest([str(self.make_pdf(["red", "lime", "blue"]))], "talk")
+        self.assertEqual(self.store.history(), [])
+        self.assertEqual(list(self.store.assets.iterdir()), [])
+
+    def test_old_history_is_migrated(self):
+        import sqlite3
+        directory = self.directory / "old"
+        directory.mkdir()
+        with sqlite3.connect(directory / "history.sqlite3") as conn:
+            conn.execute("""CREATE TABLE images (id TEXT PRIMARY KEY, session TEXT NOT NULL, title TEXT NOT NULL,
+                caption TEXT NOT NULL, source TEXT NOT NULL, snapshot TEXT NOT NULL, width INTEGER NOT NULL,
+                height INTEGER NOT NULL, created REAL NOT NULL, signature TEXT NOT NULL)""")
+            conn.execute("INSERT INTO images VALUES ('a','s','t','','/x.png','/x.png',1,1,1.0,'sig')")
+        store = Store(directory)
+        self.assertEqual([(i["id"], i["deck"]) for i in store.history("s", collapse=True)], [("a", None)])
+        self.assertEqual(store.latest_for_source("s", "/x.png"), "a")
+
+    def test_agent_session_period_filter_and_threads(self):
+        sid = "31cde43d-3856-47e7-990f-9d87748f1e6d"
+        old = self.store.ingest([str(self.source)], "study")[0]
+        with self.store.connect() as conn:
+            conn.execute("UPDATE images SET created=? WHERE id=?", (time.time() - 7200, old["id"]))
+        new = self.store.ingest([str(self.source)], "study", agent_session=sid, agent_cwd="/tmp")[0]
+        self.assertEqual(self.store.get(new["id"])["agent_session"], sid)
+        self.assertIsNone(self.store.get(old["id"])["agent_session"])
+        self.assertEqual([i["id"] for i in self.store.history("study", since=time.time() - 3600)], [new["id"]])
+        self.assertEqual(len(self.store.history("study")), 2)
+        self.assertIsNone(self.store.thread(new["id"]))
+        first = self.store.new_thread(new["id"])
+        self.store.add_message(first["id"], "user", "¿Por qué?")
+        self.store.add_message(first["id"], "assistant", "Porque sí.")
+        self.store.set_fork(first["id"], "fork-1")
+        self.assertEqual(self.store.thread(new["id"])["fork"], "fork-1")
+        self.assertEqual([m["role"] for m in self.store.messages(first["id"])], ["user", "assistant"])
+        time.sleep(.01)
+        second = self.store.new_thread(new["id"])
+        self.assertEqual(self.store.thread(new["id"])["id"], second["id"])
+        self.assertEqual(self.store.messages(second["id"]), [])
+
     def test_no_session_basename_collision(self):
         with patch.dict(os.environ, {}, clear=True), patch("pathlib.Path.cwd", return_value=Path("/a/project")):
             self.assertEqual(default_session(), "/a/project")
         with patch.dict(os.environ, {"VISOR_SESSION": "custom"}):
             self.assertEqual(default_session(), "custom")
+
+
+class ChatTests(unittest.TestCase):
+    def test_first_question_forks_read_only_and_later_ones_continue(self):
+        with patch("agent_visor.chat.claude_binary", return_value="claude"):
+            first = chat.command("orig", None, "hola")
+            later = chat.command("orig", "fork", "otra")
+        self.assertEqual(first[:5], ["claude", "-p", "--resume", "orig", "--fork-session"])
+        self.assertEqual(later[:4], ["claude", "-p", "--resume", "fork"])
+        self.assertNotIn("--fork-session", later)
+        for args in (first, later):
+            self.assertEqual(args[args.index("--tools") + 1], "Read,Grep,Glob")
+            self.assertIn("--strict-mcp-config", args)
+            self.assertEqual(args[-1], args[-1].strip())
+
+    def test_stream_events(self):
+        lines = [
+            {"type": "system", "subtype": "init", "session_id": "abc"},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "/x.py"}}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": " Respuesta "}]}},
+            {"type": "result", "subtype": "success", "is_error": False, "result": "Respuesta"},
+        ]
+        found = [event for line in lines for event in chat.events(json.dumps(line))]
+        self.assertEqual(found, [("session", "abc"), ("tool", "Read /x.py"), ("text", "Respuesta"), ("done", "")])
+        self.assertEqual(chat.events("not json"), [])
+        failed = chat.events(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True}))
+        self.assertEqual(failed[0][0], "error")
+
+    def test_environment_and_session_folder(self):
+        with patch.dict(os.environ, {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "x", "CLAUDE_CODE_USE_VERTEX": "1", "HOME_X": "y"}):
+            env = chat.clean_env()
+        self.assertNotIn("CLAUDECODE", env)
+        self.assertNotIn("CLAUDE_CODE_SESSION_ID", env)
+        self.assertEqual(env["CLAUDE_CODE_USE_VERTEX"], "1")
+        with tempfile.TemporaryDirectory(prefix="av-chat-") as directory:
+            project = Path(directory) / "projects/-some-project"
+            project.mkdir(parents=True)
+            sid = "31cde43d-3856-47e7-990f-9d87748f1e6d"
+            (project / f"{sid}.jsonl").write_text(json.dumps({"type": "meta"}) + "\n" + json.dumps({"cwd": directory}) + "\n")
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": directory}):
+                self.assertEqual(chat.session_cwd(sid, "/nonexistent"), directory)
+                self.assertEqual(chat.session_cwd("00000000-0000-0000-0000-000000000000", directory), directory)
 
 
 @unittest.skipUnless(graphical(), "No graphical desktop access")
@@ -225,6 +351,116 @@ class WindowBehaviorTests(unittest.TestCase):
                 self.assertEqual(app.scale, .02)
                 app.set_fit()
                 self.assertTrue(app.fit)
+            finally:
+                root.destroy()
+
+    def test_presentation_turns_slides_and_keeps_page_on_update(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            pdf = Path(directory) / "talk.pdf"
+            pages = [Image.new("RGB", (160, 90), color) for color in ("red", "lime", "blue")]
+            pages[0].save(pdf, save_all=True, append_images=pages[1:])
+            single = Path(directory) / "single.png"
+            Image.new("RGB", (100, 100), "white").save(single)
+            store = Store(Path(directory) / "data")
+            store.ingest([str(single)], "Talk")
+            root = tk.Tk()
+            try:
+                app = Visor(root, store)
+                deck = store.ingest([str(pdf)], "Talk")
+                response = app.dispatch({"action": "received", "items": deck})
+                root.update()
+                self.assertFalse(response["queued"])
+                self.assertEqual(app.current["id"], deck[0]["id"])
+                self.assertEqual(len(app.items), 2)
+                self.assertTrue(app.slide_bar.winfo_ismapped())
+                self.assertEqual(app.slide_label.cget("text"), "Diapositiva 1 / 3")
+                self.assertTrue(app.turn(1))
+                self.assertTrue(app.turn(1))
+                self.assertTrue(app.turn(1))
+                self.assertEqual(app.current["page"], 3)
+                regenerated = store.ingest([str(pdf)], "Talk")
+                app.dispatch({"action": "received", "items": regenerated, "watched_id": deck[0]["deck"]})
+                self.assertEqual(app.current["id"], regenerated[2]["id"])
+                app.step(1)
+                root.update()
+                self.assertEqual(app.current["deck"], deck[0]["deck"])
+                self.assertEqual(app.current["page"], 1)
+                app.step(1)
+                root.update()
+                self.assertIsNone(app.current["deck"])
+                self.assertFalse(app.turn(1))
+                self.assertFalse(app.slide_bar.winfo_ismapped())
+            finally:
+                root.destroy()
+
+    def test_chat_forks_once_then_continues_and_keys_ignore_typing(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            directory = Path(directory)
+            calls = directory / "calls.jsonl"
+            fake = directory / "claude"
+            fake.write_text(f"""#!{sys.executable}
+import json, sys
+open({str(calls)!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")
+for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
+              {{"type": "assistant", "message": {{"content": [{{"type": "tool_use", "name": "Read", "input": {{"file_path": "/a.py"}}}}]}}}},
+              {{"type": "assistant", "message": {{"content": [{{"type": "text", "text": "Es por el ruido."}}]}}}},
+              {{"type": "result", "subtype": "success", "is_error": False}}]:
+    print(json.dumps(event), flush=True)
+""")
+            fake.chmod(0o755)
+            image = directory / "plot.png"
+            Image.new("RGB", (300, 200), "white").save(image)
+            plain = directory / "plain.png"
+            Image.new("RGB", (300, 200), "black").save(plain)
+            store = Store(directory / "data")
+            store.ingest([str(plain)], "Chat")
+            item = store.ingest([str(image)], "Chat", agent_session="31cde43d-3856-47e7-990f-9d87748f1e6d", agent_cwd=str(directory))[0]
+            root = tk.Tk()
+            try:
+                with patch("agent_visor.chat.claude_binary", return_value=str(fake)):
+                    app = Visor(root, store)
+                    root.update()
+                    self.assertEqual(app.current["id"], item["id"])
+                    app.toggle_chat()
+                    root.update()
+                    self.assertTrue(app.chat.winfo_ismapped())
+                    for question in ("¿Por qué baja?", "¿Y luego?"):
+                        app.chat_input.insert("1.0", question)
+                        app.send_or_stop()
+                        deadline = time.monotonic() + 10
+                        while app.runs and time.monotonic() < deadline:
+                            root.update()
+                            time.sleep(.02)
+                        root.update()
+                    self.assertEqual(app.thread["fork"], "fork-123")
+                    self.assertEqual([m["role"] for m in store.messages(app.thread["id"])],
+                                     ["user", "tool", "assistant", "user", "tool", "assistant"])
+                    self.assertIn("Es por el ruido.", app.chat_log.get("1.0", "end"))
+                    app.append_chat("assistant", "La **clave** es `x`.")
+                    self.assertIn("La clave es x.", app.chat_log.get("1.0", "end"))
+                    self.assertEqual(str(app.copy_button.cget("state")), "normal")
+                    first, second = [json.loads(line) for line in calls.read_text().splitlines()]
+                    self.assertIn("--fork-session", first)
+                    self.assertEqual(first[first.index("--resume") + 1], "31cde43d-3856-47e7-990f-9d87748f1e6d")
+                    self.assertNotIn("--fork-session", second)
+                    self.assertEqual(second[second.index("--resume") + 1], "fork-123")
+                    app.chat_input.focus_force()
+                    root.update()
+                    app.key(lambda: self.fail("shortcut fired while typing"))(None)
+                    app.step(1)
+                    root.update()
+                    self.assertIsNone(app.current["agent_session"])
+                    self.assertEqual(str(app.send_button.cget("state")), "disabled")
+                    with store.connect() as conn:
+                        conn.execute("UPDATE images SET created=? WHERE id=?", (time.time() - 7200, app.current["id"]))
+                    app.set_period("hour")
+                    self.assertEqual([i["id"] for i in app.items], [item["id"]])
+                    app.set_period("all")
+                    self.assertEqual(len(app.items), 2)
             finally:
                 root.destroy()
 

@@ -6,7 +6,11 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
+import shlex
 import socketserver
+import subprocess
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -15,6 +19,7 @@ import traceback
 
 from PIL import Image, ImageDraw, ImageTk
 
+from . import chat
 from .ipc import MAX_REQUEST, runtime_dir, socket_path
 from .storage import Store, signature
 
@@ -27,6 +32,14 @@ MUTED = "#91a7aa"
 ACCENT = "#87d8bc"
 PAPER = "#f3f5ef"
 DARK = "#203630"
+ERROR = "#ff9b8a"
+PERIODS = (("all", "Todo"), ("today", "Hoy"), ("hour", "Última hora"))
+INLINE = re.compile(r"(\*\*[^*\n]+\*\*|`[^`\n]+`)")
+
+
+def entry(item):
+    """History entry an item belongs to: its deck, or the image itself."""
+    return item.get("deck") or item["id"]
 
 
 class Visor:
@@ -37,6 +50,7 @@ class Visor:
         self.session = None
         self.items = []
         self.current = None
+        self.pages = []
         self.original = None
         self.photo = None
         self.thumbnails = []
@@ -47,6 +61,11 @@ class Visor:
         self.watch_busy = False
         self.watch_candidate = None
         self.follow = tk.BooleanVar(value=store.setting("follow", True))
+        self.period = store.setting("period", "all")
+        self.chat_open = store.setting("chat_open", False)
+        self.chat_entry = None
+        self.thread = None
+        self.runs = {}
         root.title("Visor · Tu espacio visual")
         root.geometry(store.setting("geometry", "1120x760"))
         root.minsize(820, 540)
@@ -54,6 +73,8 @@ class Visor:
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
         self._icon()
+        if self.chat_open:
+            self.chat.pack(side="right", fill="y", before=self.main)
         self.refresh_sessions()
         saved_session = store.setting("session")
         if saved_session in [entry['session'] for entry in self.sessions]:
@@ -62,16 +83,25 @@ class Visor:
             self.select_session(self.sessions[0]["session"])
         else:
             self.draw()
-        root.bind("<Left>", lambda event: self.step(1))
-        root.bind("<Right>", lambda event: self.step(-1))
-        root.bind("<Key-f>", lambda event: self.set_fit())
-        root.bind("<Key-1>", lambda event: self.actual_size())
+        # Inside a presentation the side arrows turn slides; up/down always move through history.
+        root.bind("<Left>", self.key(lambda: self.turn(-1) or self.step(1)))
+        root.bind("<Right>", self.key(lambda: self.turn(1) or self.step(-1)))
+        root.bind("<Up>", self.key(lambda: self.step(-1)))
+        root.bind("<Down>", self.key(lambda: self.step(1)))
+        root.bind("<Prior>", self.key(lambda: self.turn(-1)))
+        root.bind("<Next>", self.key(lambda: self.turn(1)))
+        root.bind("<Key-f>", self.key(self.set_fit))
+        root.bind("<Key-1>", self.key(self.actual_size))
         root.bind("<Control-o>", lambda event: self.open_files())
         root.bind("<Control-plus>", lambda event: self.zoom(1.2))
         root.bind("<Control-equal>", lambda event: self.zoom(1.2))
         root.bind("<Control-minus>", lambda event: self.zoom(1 / 1.2))
         root.after(50, self.poll_events)
         root.after(900, self.watch)
+
+    def key(self, action):
+        """Window shortcuts, except while the user is typing a question."""
+        return lambda event: None if self.root.focus_get() is self.chat_input else action()
 
     def _label(self, parent, text, fg=INK, bg=None, size=10, weight="normal", **kwargs):
         return tk.Label(parent, text=text, fg=fg, bg=bg or parent.cget("bg"),
@@ -98,6 +128,7 @@ class Visor:
         self._label(brand, "Visor", size=19, weight="bold", anchor="w").pack(anchor="w")
         self._label(brand, "Un espacio para tus resultados", fg=MUTED, size=9).pack(anchor="w")
         self._button(header, "Abrir imagen  +", self.open_files).pack(side="right", padx=22)
+        self._button(header, "Preguntar  ?", self.toggle_chat).pack(side="right")
         self._label(header, "●  Listo para recibir", fg=ACCENT, size=9).pack(side="right", padx=10)
         tk.Frame(self.root, height=1, bg="#2a3b40").pack(fill="x")
         body = tk.Frame(self.root, bg=PANEL)
@@ -125,6 +156,15 @@ class Visor:
         self._label(history_title, "HISTORIAL", fg=MUTED, size=8, weight="bold").pack(side="left")
         self.count_label = self._label(history_title, "0", fg=MUTED, size=8)
         self.count_label.pack(side="right")
+        periods = tk.Frame(sidebar, bg=PANEL)
+        periods.pack(fill="x", padx=17, pady=(0, 10))
+        self.period_buttons = {}
+        for key, text in PERIODS:
+            button = tk.Button(periods, text=text, command=lambda value=key: self.set_period(value), relief="flat", bd=0,
+                               highlightthickness=0, cursor="hand2", font=("DejaVu Sans", 8), padx=9, pady=4)
+            button.pack(side="left", padx=(0, 5))
+            self.period_buttons[key] = button
+        self.paint_periods()
         hist_area = tk.Frame(sidebar, bg=PANEL)
         hist_area.pack(fill="both", expand=True, padx=(10, 0))
         self.history_canvas = tk.Canvas(hist_area, bg=PANEL, highlightthickness=0, bd=0, width=244)
@@ -137,8 +177,9 @@ class Visor:
         self.history_frame.bind("<Configure>", lambda event: self.history_canvas.configure(scrollregion=self.history_canvas.bbox("all")))
         self.history_canvas.bind("<Configure>", lambda event: self.history_canvas.itemconfigure(self.history_window, width=event.width))
         self._label(sidebar, "LOCAL  /  EN TU EQUIPO", fg=MUTED, size=8).pack(anchor="w", padx=20, pady=18)
-        main = tk.Frame(body, bg=PAPER)
+        main = self.main = tk.Frame(body, bg=PAPER)
         main.pack(side="left", fill="both", expand=True)
+        self._build_chat(body)
         heading = tk.Frame(main, bg=PAPER)
         heading.pack(fill="x", padx=28, pady=(25, 15))
         self.title_label = self._label(heading, "Tu próxima idea, aquí.", fg=DARK, size=19, weight="bold", anchor="w")
@@ -161,6 +202,11 @@ class Visor:
         self._button(controls, "→", lambda: self.step(-1), light=True).pack(side="left", padx=(5, 13))
         self.position_label = self._label(controls, "", fg="#63766c", size=9)
         self.position_label.pack(side="left")
+        self.slide_bar = tk.Frame(controls, bg=PAPER)
+        self._button(self.slide_bar, "‹", lambda: self.turn(-1), light=True).pack(side="left")
+        self.slide_label = self._label(self.slide_bar, "", fg=DARK, size=9, weight="bold", width=17)
+        self.slide_label.pack(side="left")
+        self._button(self.slide_bar, "›", lambda: self.turn(1), light=True).pack(side="left")
         self._button(controls, "Ajustar", self.set_fit, light=True).pack(side="right")
         self._button(controls, "1:1", self.actual_size, light=True).pack(side="right", padx=5)
         self._button(controls, "+", lambda: self.zoom(1.2), light=True).pack(side="right")
@@ -169,6 +215,37 @@ class Visor:
         self._button(controls, "−", lambda: self.zoom(1 / 1.2), light=True).pack(side="right")
         self.detail_label = self._label(main, "La ventana se abre sola cuando tu agente muestra algo.", fg="#748277", size=8, anchor="w")
         self.detail_label.pack(fill="x", padx=25, pady=(2, 16))
+
+    def _build_chat(self, body):
+        self.chat = tk.Frame(body, bg=PANEL, width=380)
+        self.chat.pack_propagate(False)
+        self._label(self.chat, "PREGUNTAR A LA SESIÓN", fg=MUTED, size=8, weight="bold").pack(anchor="w", padx=18, pady=(22, 6))
+        self.chat_status = self._label(self.chat, "", fg=MUTED, size=8, anchor="w", justify="left", wraplength=340)
+        self.chat_status.pack(fill="x", padx=18)
+        actions = tk.Frame(self.chat, bg=PANEL)
+        actions.pack(fill="x", padx=16, pady=(10, 8))
+        self._button(actions, "Nuevo hilo", self.new_thread).pack(side="left")
+        self.copy_button = self._button(actions, "Copiar comando", self.copy_command)
+        self.copy_button.pack(side="left", padx=6)
+        bottom = tk.Frame(self.chat, bg=PANEL)
+        bottom.pack(side="bottom", fill="x", padx=16, pady=(8, 16))
+        self.chat_input = tk.Text(bottom, height=4, wrap="word", bg=CARD, fg=INK, insertbackground=INK, relief="flat",
+                                  font=("DejaVu Sans", 10), padx=8, pady=6, highlightthickness=1,
+                                  highlightbackground="#2a3b40", highlightcolor=ACCENT)
+        self.chat_input.pack(fill="x")
+        self.chat_input.bind("<Return>", self.chat_return)
+        self.send_button = self._button(bottom, "Enviar", self.send_or_stop, primary=True)
+        self.send_button.pack(anchor="e", pady=(8, 0))
+        self.chat_log = tk.Text(self.chat, wrap="word", bg=CARD, fg=INK, relief="flat", font=("DejaVu Sans", 10),
+                                padx=10, pady=10, state="disabled", highlightthickness=0, cursor="arrow", takefocus=0)
+        self.chat_log.pack(fill="both", expand=True, padx=16)
+        self.chat_log.tag_configure("user", foreground=ACCENT, font=("DejaVu Sans", 10, "bold"), spacing1=8)
+        self.chat_log.tag_configure("assistant", spacing1=4)
+        self.chat_log.tag_configure("tool", foreground=MUTED, font=("DejaVu Sans", 8))
+        self.chat_log.tag_configure("error", foreground=ERROR)
+        self.chat_log.tag_configure("note", foreground=MUTED, font=("DejaVu Sans", 9, "italic"))
+        self.chat_log.tag_configure("bold", font=("DejaVu Sans", 10, "bold"))
+        self.chat_log.tag_configure("code", font=("DejaVu Sans Mono", 9), foreground="#cfe6dd")
 
     def _icon(self):
         icon = Image.new("RGBA", (64, 64), BG)
@@ -208,21 +285,55 @@ class Visor:
         self.refresh_history()
         if self.items:
             self.select(self.items[0], rebuild=False)
+        elif self.current and self.current["session"] != session:
+            self.clear_view()
         self.new_button.pack_forget()
 
+    def clear_view(self):
+        """Nothing of this project falls in the chosen period: show an empty canvas, not another project's image."""
+        if self.original:
+            self.original.close()
+        self.current, self.original, self.pages = None, None, []
+        self.title_label.configure(text="Nada en este periodo")
+        self.caption_label.configure(text="Elige «Todo» en el historial para ver las imágenes anteriores.")
+        self.detail_label.configure(text="")
+        self.position_label.configure(text="")
+        self.slide_bar.pack_forget()
+        self.load_chat()
+        self.draw()
+
+    def since(self):
+        if self.period == "hour":
+            return time.time() - 3600
+        if self.period == "today":
+            return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        return None
+
+    def set_period(self, period):
+        self.period = period
+        self.store.set_setting("period", period)
+        self.paint_periods()
+        self.refresh_history()
+
+    def paint_periods(self):
+        for key, button in self.period_buttons.items():
+            chosen = key == self.period
+            button.configure(bg=ACCENT if chosen else CARD, fg=DARK if chosen else INK,
+                             activebackground="#a6e6d0" if chosen else SELECTED, activeforeground=DARK if chosen else INK)
+
     def refresh_history(self):
-        self.items = self.store.history(self.session, 200) if self.session else []
+        self.items = self.store.history(self.session, 200, collapse=True, since=self.since()) if self.session else []
         self.count_label.configure(text=str(len(self.items)))
         for child in self.history_frame.winfo_children():
             child.destroy()
         self.thumbnails.clear()
         self.cards = {}
         for index, item in enumerate(self.items):
-            active = self.current and item["id"] == self.current["id"]
+            active = self.current and entry(item) == entry(self.current)
             bg = SELECTED if active else CARD
             card = tk.Frame(self.history_frame, bg=bg, padx=9, pady=9, cursor="hand2")
             card.pack(fill="x", padx=(4, 9), pady=(0, 7))
-            self.cards[item["id"]] = card
+            self.cards[entry(item)] = card
             top = tk.Frame(card, bg=bg)
             top.pack(fill="x")
             thumbpath = Path(item["snapshot"]).with_suffix(".thumb.png")
@@ -240,7 +351,10 @@ class Visor:
             self._label(text, item["title"], bg=bg, size=9, weight="bold", anchor="w", wraplength=116, justify="left").pack(anchor="w")
             stamp = datetime.fromtimestamp(item["created"]).strftime("%d %b · %H:%M:%S")
             self._label(text, stamp, fg=MUTED, bg=bg, size=8).pack(anchor="w", pady=(4, 0))
-            self._label(card, "ÚLTIMA" if index == 0 else f"VERSIÓN {len(self.items) - index}", fg=ACCENT if index == 0 else MUTED,
+            tag = "ÚLTIMA" if index == 0 else f"VERSIÓN {len(self.items) - index}"
+            if item.get("deck"):
+                tag += f"  ·  {item['pages']} DIAPOSITIVA{'S' if item['pages'] != 1 else ''}"
+            self._label(card, tag, fg=ACCENT if index == 0 else MUTED,
                         bg=bg, size=7, anchor="w").pack(anchor="w", pady=(6, 0))
             def bind_tree(widget, chosen=item):
                 widget.bind("<Button-1>", lambda event, value=chosen: self.select(value))
@@ -249,11 +363,17 @@ class Visor:
                 for child in widget.winfo_children():
                     bind_tree(child, chosen)
             bind_tree(card)
+        if self.session and not self.items:
+            self._label(self.history_frame, "Nada en este periodo.", fg=MUTED, size=9).pack(anchor="w", padx=10, pady=6)
 
     def select(self, item, rebuild=True):
         if self.original:
             self.original.close()
         self.current = item
+        if not item.get("deck"):
+            self.pages = []
+        elif not self.pages or self.pages[0]["deck"] != item["deck"]:
+            self.pages = self.store.deck_pages(item["deck"])
         try:
             with Image.open(item["snapshot"]) as image:
                 self.original = image.convert("RGBA")
@@ -266,14 +386,21 @@ class Visor:
         self.caption_label.configure(text=item["caption"] or Path(item["source"]).name)
         self.root.title(f"{item['title']} · Visor")
         self.detail_label.configure(text=f"{item['width']} × {item['height']} px   ·   {item['source']}")
+        if self.pages:
+            self.slide_label.configure(text=f"Diapositiva {item['page']} / {len(self.pages)}")
+            self.slide_bar.pack(side="left", padx=(24, 0))
+        else:
+            self.slide_bar.pack_forget()
         if rebuild:
             self.refresh_history()
         else:
             for key, card in self.cards.items():
-                color = SELECTED if key == item["id"] else CARD
+                color = SELECTED if key == entry(item) else CARD
                 self._recolor(card, color)
-        index = next((i for i, value in enumerate(self.items) if value["id"] == item["id"]), 0)
+        index = next((i for i, value in enumerate(self.items) if entry(value) == entry(item)), 0)
         self.position_label.configure(text=f"{len(self.items) - index} / {len(self.items)}")
+        if self.chat_entry != entry(item):
+            self.load_chat()
         self.draw()
 
     def _recolor(self, widget, color):
@@ -344,6 +471,7 @@ class Visor:
         self.draw()
 
     def pan_start(self, event):
+        self.canvas.focus_set()
         self.drag_origin = (event.x, event.y, self.pan.copy())
 
     def pan_move(self, event):
@@ -354,10 +482,19 @@ class Visor:
         self.pan = [pan[0] + event.x - x, pan[1] + event.y - y]
         self.draw()
 
+    def turn(self, direction):
+        """Move within the current presentation. Returns False when no presentation is shown."""
+        if not self.pages or not self.current:
+            return False
+        target = self.current["page"] - 1 + direction
+        if 0 <= target < len(self.pages):
+            self.select(self.pages[target], rebuild=False)
+        return True
+
     def step(self, direction):
         if not self.items or not self.current:
             return
-        index = next((i for i, item in enumerate(self.items) if item["id"] == self.current["id"]), 0)
+        index = next((i for i, item in enumerate(self.items) if entry(item) == entry(self.current)), 0)
         target = max(0, min(len(self.items) - 1, index + direction))
         self.select(self.items[target])
         self.history_canvas.yview_moveto(target / max(1, len(self.items)))
@@ -374,14 +511,15 @@ class Visor:
         self.new_button.pack_forget()
 
     def open_files(self):
-        paths = filedialog.askopenfilenames(title="Mostrar imágenes", filetypes=[("Imágenes", "*.png *.jpg *.jpeg *.webp *.gif *.tif *.tiff *.bmp *.ico"), ("Todos los archivos", "*")])
+        paths = filedialog.askopenfilenames(title="Mostrar imágenes", filetypes=[("Imágenes y PDF", "*.pdf *.png *.jpg *.jpeg *.webp *.gif *.tif *.tiff *.bmp *.ico"), ("Todos los archivos", "*")])
         if paths:
             self.ingest_in_background({"paths": list(paths), "session": self.session or "Imágenes"})
 
     def ingest_in_background(self, payload, watched_id=None):
         def worker():
             try:
-                items = self.store.ingest(payload["paths"], payload["session"], payload.get("title", ""), payload.get("caption", ""))
+                items = self.store.ingest(payload["paths"], payload["session"], payload.get("title", ""), payload.get("caption", ""),
+                                          payload.get("deck", False), payload.get("agent_session"), payload.get("agent_cwd"))
                 self.events.put(({"action": "received", "items": items, "focus": payload.get("focus", False), "watched_id": watched_id}, None, None))
             except Exception as exc:
                 self.events.put(({"action": "notice", "message": str(exc)}, None, None))
@@ -393,16 +531,25 @@ class Visor:
         try:
             if self.follow.get() and self.current and not self.watch_busy:
                 item = self.current
-                if self.store.latest_for_source(item["session"], item["source"]) == item["id"]:
-                    try:
-                        value = signature(Path(item["source"]))
-                    except OSError:
-                        value = None
-                    if value and value != item["signature"]:
-                        candidate = (item["id"], value)
+                # A presentation is watched as a whole: every source file it was made from.
+                sources = []
+                for row in self.pages or [item]:
+                    if not sources or sources[-1][0] != row["source"]:
+                        sources.append((row["source"], row["signature"]))
+                if all(self.store.latest_for_source(item["session"], source) == entry(item) for source, _ in sources):
+                    values = []
+                    for source, _ in sources:
+                        try:
+                            values.append(signature(Path(source)))
+                        except OSError:
+                            values.append(None)
+                    if all(values) and values != [stored for _, stored in sources]:
+                        candidate = (entry(item), tuple(values))
                         if candidate == self.watch_candidate:
                             self.watch_busy = True
-                            self.ingest_in_background({"paths": [item["source"]], "session": item["session"], "title": item["title"], "caption": item["caption"]}, item["id"])
+                            self.ingest_in_background({"paths": [source for source, _ in sources], "session": item["session"],
+                                "title": item["title"], "caption": item["caption"], "deck": bool(item.get("deck")),
+                                "agent_session": item.get("agent_session"), "agent_cwd": item.get("agent_cwd")}, entry(item))
                             self.watch_candidate = None
                         else:
                             self.watch_candidate = candidate
@@ -410,6 +557,138 @@ class Visor:
                         self.watch_candidate = None
         finally:
             self.root.after(900, self.watch)
+
+    def toggle_chat(self):
+        self.chat_open = not self.chat_open
+        self.store.set_setting("chat_open", self.chat_open)
+        if self.chat_open:
+            self.chat.pack(side="right", fill="y", before=self.main)
+            self.chat_input.focus_set()
+        else:
+            self.chat.pack_forget()
+        self.schedule_draw()
+
+    def load_chat(self):
+        """Show the newest thread of the selected entry."""
+        item = self.current
+        self.chat_entry = entry(item) if item else None
+        self.thread = self.store.thread(self.chat_entry) if item else None
+        self.chat_log.configure(state="normal")
+        self.chat_log.delete("1.0", "end")
+        self.chat_log.configure(state="disabled")
+        if not item:
+            self.chat_status.configure(text="Elige una imagen del historial.")
+        elif not item.get("agent_session"):
+            self.chat_status.configure(text="Esta imagen no la mostró una sesión de Claude Code, así que no hay sesión a la que preguntar.")
+        else:
+            self.chat_status.configure(text=f"Bifurcación de la sesión {item['agent_session'][:8]} · solo lectura (Read, Grep, Glob). "
+                                            "La sesión original no cambia.")
+            messages = self.store.messages(self.thread["id"]) if self.thread else []
+            for message in messages:
+                self.append_chat(message["role"], message["text"])
+            if not messages:
+                self.append_chat("note", "Pregunta lo que quieras sobre esta figura. La primera pregunta crea la bifurcación.")
+        self.update_chat_buttons()
+
+    def append_chat(self, role, text):
+        prefix = {"user": "Tú:  ", "tool": "·  ", "error": "⚠  "}.get(role, "")
+        self.chat_log.configure(state="normal")
+        self.chat_log.insert("end", prefix, role)
+        # Answers come as light Markdown: render **bold** and `code`, leave the rest as written.
+        for part in INLINE.split(text) if role == "assistant" else [text]:
+            if part.startswith("**") and part.endswith("**") and len(part) > 4:
+                self.chat_log.insert("end", part[2:-2], (role, "bold"))
+            elif part.startswith("`") and part.endswith("`") and len(part) > 2:
+                self.chat_log.insert("end", part[1:-1], (role, "code"))
+            else:
+                self.chat_log.insert("end", part, role)
+        self.chat_log.insert("end", "\n\n", role)
+        self.chat_log.configure(state="disabled")
+        self.chat_log.see("end")
+
+    def update_chat_buttons(self):
+        usable = bool(self.current and self.current.get("agent_session"))
+        running = bool(self.thread and self.thread["id"] in self.runs)
+        self.send_button.configure(text="Detener" if running else "Enviar", state="normal" if usable else "disabled")
+        self.chat_input.configure(state="normal" if usable else "disabled")
+        self.copy_button.configure(state="normal" if self.thread and self.thread["fork"] else "disabled")
+
+    def chat_return(self, event):
+        if event.state & 0x1:  # Shift+Enter keeps a new line
+            return None
+        self.send_or_stop()
+        return "break"
+
+    def new_thread(self):
+        if self.current and self.current.get("agent_session"):
+            self.store.new_thread(entry(self.current))
+            self.load_chat()
+
+    def copy_command(self):
+        if not (self.thread and self.thread["fork"] and self.current):
+            return
+        cwd = chat.session_cwd(self.current["agent_session"], self.current.get("agent_cwd"))
+        line = f"cd {shlex.quote(cwd)} && claude --resume {self.thread['fork']}"
+        self.root.clipboard_clear()
+        self.root.clipboard_append(line)
+        self.chat_status.configure(text=f"Copiado para seguir en la terminal:\n{line}")
+
+    def send_or_stop(self):
+        item = self.current
+        if not (item and item.get("agent_session")):
+            return
+        if self.thread and self.thread["id"] in self.runs:
+            self.runs[self.thread["id"]].terminate()
+            return
+        question = self.chat_input.get("1.0", "end").strip()
+        if not question:
+            return
+        thread = self.thread or self.store.new_thread(entry(item))
+        self.thread = thread
+        if not self.store.messages(thread["id"]):
+            self.chat_log.configure(state="normal")
+            self.chat_log.delete("1.0", "end")
+            self.chat_log.configure(state="disabled")
+        self.chat_input.delete("1.0", "end")
+        self.store.add_message(thread["id"], "user", question)
+        self.append_chat("user", question)
+        try:
+            args = chat.command(item["agent_session"], thread["fork"], chat.prompt(question, item, not thread["fork"]))
+            errors = tempfile.TemporaryFile()
+            process = subprocess.Popen(args, cwd=chat.session_cwd(item["agent_session"], item.get("agent_cwd")),
+                                       env=chat.clean_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=errors, text=True, bufsize=1)
+        except (OSError, RuntimeError) as exc:
+            self.store.add_message(thread["id"], "error", str(exc))
+            self.append_chat("error", str(exc))
+            return
+        self.runs[thread["id"]] = process
+        self.update_chat_buttons()
+        threading.Thread(target=self.chat_worker, args=(thread["id"], process, errors), daemon=True).start()
+
+    def chat_worker(self, thread, process, errors):
+        """Reads the fork's stream off the Tk thread; the window only receives finished events."""
+        finished = False
+        try:
+            for line in process.stdout:
+                for kind, text in chat.events(line):
+                    if kind == "session":
+                        self.store.set_fork(thread, text)
+                    elif kind in ("text", "tool", "error"):
+                        self.store.add_message(thread, "assistant" if kind == "text" else kind, text)
+                    finished = finished or kind == "done"
+                    self.events.put(({"action": "chat", "thread": thread, "kind": kind, "text": text}, None, None))
+            process.wait()
+            if not finished:
+                errors.seek(0)
+                detail = errors.read().decode("utf-8", "replace").strip()[-600:]
+                message = "Detenido." if process.returncode and process.returncode < 0 else (detail or f"claude terminó con código {process.returncode}.")
+                self.store.add_message(thread, "error", message)
+                self.events.put(({"action": "chat", "thread": thread, "kind": "error", "text": message}, None, None))
+        finally:
+            process.stdout.close()
+            errors.close()
+            self.events.put(({"action": "chat", "thread": thread, "kind": "end", "text": ""}, None, None))
 
     def dispatch(self, payload):
         action = payload["action"]
@@ -422,14 +701,19 @@ class Visor:
         if action in ("show", "received"):
             items = payload["items"]
             watched_id = payload.get("watched_id")
+            # Show the last entry received: a single image, or the first slide of a presentation.
+            shown = [item for item in items if entry(item) == entry(items[-1])]
+            target = shown[0]
             self.refresh_sessions()
-            if not self.current or (self.follow.get() and (not watched_id or self.current["id"] == watched_id)):
-                self.session = items[-1]["session"]
+            if not self.current or (self.follow.get() and (not watched_id or entry(self.current) == watched_id)):
+                if watched_id and self.current and self.current.get("deck") and target.get("deck"):
+                    target = shown[min(self.current["page"], len(shown)) - 1]
+                self.session = target["session"]
                 self.store.set_setting("session", self.session)
-                self.current = items[-1]
+                self.current = target
                 self.refresh_sessions()
                 self.refresh_history()
-                self.select(items[-1], rebuild=False)
+                self.select(target, rebuild=False)
                 self.history_canvas.yview_moveto(0)
                 self.new_button.pack_forget()
             else:
@@ -440,7 +724,7 @@ class Visor:
                 self.root.lift()
             return {"ok": True, "running": True, "pid": os.getpid(), "session": items[-1]["session"],
                     "shown": len(items), "item_ids": [item["id"] for item in items], "current_id": self.current["id"],
-                    "queued": self.current["id"] != items[-1]["id"]}
+                    "queued": self.current["id"] != target["id"]}
         if action == "open":
             if payload.get("session"):
                 if payload["session"] not in [row["session"] for row in self.sessions]:
@@ -449,6 +733,15 @@ class Visor:
             self.root.deiconify()
             self.root.lift()
             return self.dispatch({"action": "status"})
+        if action == "chat":
+            if payload["kind"] == "end":
+                self.runs.pop(payload["thread"], None)
+            if self.thread and self.thread["id"] == payload["thread"]:
+                if payload["kind"] == "session":
+                    self.thread["fork"] = payload["text"]
+                elif payload["kind"] in ("text", "tool", "error"):
+                    self.append_chat("assistant" if payload["kind"] == "text" else payload["kind"], payload["text"])
+                self.update_chat_buttons()
         if action == "notice":
             self.detail_label.configure(text=payload["message"])
         if action == "watch_done":
@@ -472,6 +765,8 @@ class Visor:
         self.root.after(50, self.poll_events)
 
     def close(self):
+        for process in list(self.runs.values()):
+            process.terminate()
         self.store.set_setting("geometry", self.root.geometry())
         self.store.set_setting("follow", self.follow.get())
         self.root.destroy()
@@ -494,7 +789,13 @@ class Handler(socketserver.StreamRequestHandler):
                 for key in ("session", "title", "caption"):
                     if key in payload and not isinstance(payload[key], str):
                         raise ValueError(f"{key} debe ser texto.")
-                payload["items"] = self.server.app.store.ingest(paths, payload.get("session", "Imágenes"), payload.get("title", ""), payload.get("caption", ""))
+                if not isinstance(payload.get("deck", False), bool):
+                    raise ValueError("deck debe ser true o false.")
+                for key in ("agent_session", "agent_cwd"):
+                    if payload.get(key) is not None and not isinstance(payload[key], str):
+                        raise ValueError(f"{key} debe ser texto.")
+                payload["items"] = self.server.app.store.ingest(paths, payload.get("session", "Imágenes"), payload.get("title", ""),
+                    payload.get("caption", ""), payload.get("deck", False), payload.get("agent_session"), payload.get("agent_cwd"))
             done, result = threading.Event(), {}
             self.server.app.events.put((payload, done, result))
             if not done.wait(16):
