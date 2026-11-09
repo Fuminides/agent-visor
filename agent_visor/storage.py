@@ -220,6 +220,19 @@ class Store:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, (*values, limit))]
 
+    def versions(self, session):
+        """{entry: (n, total)}: position of each entry among the entries made from the same source file."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT COALESCE(deck, id) AS entry, source FROM images WHERE session=? "
+                                "AND (deck IS NULL OR page=1) ORDER BY created", (session,)).fetchall()
+        totals, seen, result = {}, {}, {}
+        for row in rows:
+            totals[row["source"]] = totals.get(row["source"], 0) + 1
+        for row in rows:
+            seen[row["source"]] = seen.get(row["source"], 0) + 1
+            result[row["entry"]] = (seen[row["source"]], totals[row["source"]])
+        return result
+
     def deck_pages(self, deck):
         with self.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM images WHERE deck=? ORDER BY page", (deck,))]

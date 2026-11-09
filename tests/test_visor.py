@@ -185,6 +185,17 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.store.thread(new["id"])["id"], second["id"])
         self.assertEqual(self.store.messages(second["id"]), [])
 
+    def test_versions_count_only_the_same_source_file(self):
+        other = self.directory / "other.png"
+        Image.new("RGB", (40, 40), "white").save(other)
+        first = self.store.ingest([str(self.source)], "study")[0]
+        unrelated = self.store.ingest([str(other)], "study")[0]
+        second = self.store.ingest([str(self.source)], "study")[0]
+        versions = self.store.versions("study")
+        self.assertEqual(versions[first["id"]], (1, 2))
+        self.assertEqual(versions[second["id"]], (2, 2))
+        self.assertEqual(versions[unrelated["id"]], (1, 1))
+
     def test_no_session_basename_collision(self):
         with patch.dict(os.environ, {}, clear=True), patch("pathlib.Path.cwd", return_value=Path("/a/project")):
             self.assertEqual(default_session(), "/a/project")
@@ -530,6 +541,69 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                     self.assertEqual([i["id"] for i in app.items], [item["id"]])
                     app.set_period("all")
                     self.assertEqual(len(app.items), 2)
+            finally:
+                root.destroy()
+
+    def test_review_fixes_layout_focus_versions_and_empty_states(self):
+        import tkinter as tk
+        from agent_visor.app import Visor, CHAT_MIN_WINDOW
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            directory = Path(directory)
+            store = Store(directory / "data")
+            root = tk.Tk()
+            try:
+                store.set_setting("geometry", "820x540")
+                app = Visor(root, store)
+                root.update()
+                self.assertEqual(app.session_var.get(), "No projects yet")
+                one, two = directory / "one.png", directory / "two.png"
+                Image.new("RGB", (300, 200), "white").save(one)
+                Image.new("RGB", (300, 200), "black").save(two)
+                items = store.ingest([str(one)], "Fix") + store.ingest([str(two)], "Fix")
+                app.dispatch({"action": "received", "items": items[-1:]})
+                root.update()
+                tags = [label.cget("text") for card in app.cards.values() for label in card.winfo_children()
+                        if isinstance(label, tk.Label) and label.cget("text").isupper()]
+                self.assertEqual(tags, ["LATEST"])  # two different files: no version tags
+                self.assertEqual(app.count_label.cget("text"), "2 / 2")
+                self.assertIn("two.png   ·   " + str(directory), app.detail_label.cget("text"))
+                # The panel without a session explains itself and offers nothing to click.
+                app.toggle_chat()
+                root.update()
+                self.assertEqual(root.minsize()[0], CHAT_MIN_WINDOW)
+                self.assertGreaterEqual(root.winfo_width(), CHAT_MIN_WINDOW)
+                self.assertGreaterEqual(app.canvas.winfo_width() / root.winfo_width(), .4)
+                self.assertEqual(app.chat_bottom.winfo_manager(), "")
+                self.assertEqual(app.chat_actions.winfo_manager(), "")
+                self.assertEqual(app.ask_button.cget("bg"), "#87d8bc")
+                app.toggle_chat()
+                self.assertEqual(root.minsize()[0], 820)
+                self.assertNotEqual(app.ask_button.cget("bg"), "#87d8bc")
+                # Every button shows a focus ring.
+                def buttons(widget):
+                    for child in widget.winfo_children():
+                        if isinstance(child, (tk.Button, tk.Checkbutton)):
+                            yield child
+                        yield from buttons(child)
+                self.assertTrue(all(int(b.cget("highlightthickness")) >= 2 for b in buttons(root)))
+                # A filter that hides everything also empties the canvas.
+                with store.connect() as conn:
+                    conn.execute("UPDATE images SET created = created - 7200")
+                app.set_period("hour")
+                self.assertIsNone(app.current)
+                self.assertEqual(app.title_label.cget("text"), "Nothing in this period")
+                app.set_period("all")
+                self.assertIsNotNone(app.select(app.items[0]) or app.current)
+                # Same with the filter already on when the project is (re)selected.
+                app.period = "hour"
+                app.select_session("Fix")
+                self.assertIsNone(app.current)
+                app.set_period("all")
+                # The panel's explanation wraps inside the panel at its narrowest width.
+                app.toggle_chat()
+                root.update()
+                self.assertLessEqual(int(app.chat_status.cget("wraplength")), int(app.chat.cget("width")) - 36)
+                app.toggle_chat()
             finally:
                 root.destroy()
 

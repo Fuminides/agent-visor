@@ -34,6 +34,11 @@ PAPER = "#f3f5ef"
 DARK = "#203630"
 ERROR = "#ff9b8a"
 PERIODS = ("all", "today", "hour")
+# Text greys chosen for at least 4.5:1 contrast on their backgrounds.
+SOFT = "#607268"
+FAINT = "#647167"
+# With the question panel open the window needs room for sidebar, panel and a usable figure.
+CHAT_MIN_WINDOW = 1080
 INLINE = re.compile(r"(\*\*[^*\n]+\*\*|`[^`\n]+`)")
 
 
@@ -76,6 +81,8 @@ class Visor:
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
         self._icon()
+        self.apply_chat_layout()
+        root.bind("<Configure>", self.resize_chat, add="+")
         self.refresh_sessions()
         saved_session = store.setting("session")
         if saved_session in [entry['session'] for entry in self.sessions]:
@@ -113,6 +120,7 @@ class Visor:
             child.destroy()
         self.root.title(self.t("window_title"))
         self._build()
+        self.apply_chat_layout()
         self.refresh_sessions()
         self.refresh_history()
         self.chat_entry = None
@@ -135,10 +143,20 @@ class Visor:
     def _button(self, parent, text, command, primary=False, light=False):
         bg = ACCENT if primary else ("#e1e7df" if light else CARD)
         fg = DARK if primary or light else INK
+        # A 2 px ring in the parent's colour, which turns visible when the button has keyboard focus.
         return tk.Button(parent, text=text, command=command, bg=bg, fg=fg,
                          activebackground="#a6e6d0" if primary else ("#d4ded3" if light else SELECTED),
-                         activeforeground=fg, relief="flat", bd=0, highlightthickness=0,
+                         activeforeground=fg, relief="flat", bd=0, highlightthickness=2,
+                         highlightbackground=parent.cget("bg"), highlightcolor=DARK if light else (INK if primary else ACCENT),
                          cursor="hand2", font=("DejaVu Sans", 10), padx=13, pady=7)
+
+    def _chip(self, parent, text, command, chosen=False, bold=False):
+        """Small toggle-like button: filters, languages, history arrows."""
+        return tk.Button(parent, text=text, command=command, relief="flat", bd=0, cursor="hand2",
+                         font=("DejaVu Sans", 8, "bold" if bold else "normal"), padx=8, pady=3,
+                         bg=ACCENT if chosen else CARD, fg=DARK if chosen else INK,
+                         activebackground="#a6e6d0" if chosen else SELECTED, activeforeground=DARK if chosen else INK,
+                         highlightthickness=2, highlightbackground=parent.cget("bg"), highlightcolor=INK if chosen else ACCENT)
 
     def _build(self):
         header = tk.Frame(self.root, bg=BG, height=78)
@@ -153,16 +171,13 @@ class Visor:
         self._label(brand, "Visor", size=19, weight="bold", anchor="w").pack(anchor="w")
         self._label(brand, self.t("tagline"), fg=MUTED, size=9).pack(anchor="w")
         self._button(header, self.t("open_image"), self.open_files).pack(side="right", padx=22)
-        self._button(header, self.t("ask"), self.toggle_chat).pack(side="right")
+        self.ask_button = self._button(header, self.t("ask"), self.toggle_chat)
+        self.ask_button.pack(side="right")
         languages = tk.Frame(header, bg=BG)
         languages.pack(side="right", padx=(0, 16))
         for code in i18n.LANGUAGES:
             chosen = code == self.language
-            tk.Button(languages, text=code.upper(), command=lambda value=code: self.set_language(value), relief="flat", bd=0,
-                      highlightthickness=0, cursor="hand2", font=("DejaVu Sans", 8, "bold" if chosen else "normal"), padx=7, pady=4,
-                      bg=ACCENT if chosen else CARD, fg=DARK if chosen else INK,
-                      activebackground="#a6e6d0" if chosen else SELECTED, activeforeground=DARK if chosen else INK).pack(side="left", padx=1)
-        self._label(header, self.t("ready"), fg=ACCENT, size=9).pack(side="right", padx=10)
+            self._chip(languages, code.upper(), lambda value=code: self.set_language(value), chosen, bold=chosen).pack(side="left")
         tk.Frame(self.root, height=1, bg="#2a3b40").pack(fill="x")
         body = tk.Frame(self.root, bg=PANEL)
         body.pack(fill="both", expand=True)
@@ -176,6 +191,9 @@ class Visor:
                         foreground=INK, arrowcolor=ACCENT, borderwidth=0, padding=7)
         style.map("Visor.TCombobox", fieldbackground=[("readonly", CARD)],
                   selectbackground=[("readonly", CARD)], selectforeground=[("readonly", INK)])
+        style.configure("Visor.Vertical.TScrollbar", background=CARD, troughcolor=PANEL, bordercolor=PANEL,
+                        lightcolor=CARD, darkcolor=CARD, arrowcolor=MUTED, gripcount=0)
+        style.map("Visor.Vertical.TScrollbar", background=[("active", SELECTED)])
         self.session_var = tk.StringVar()
         self.session_box = ttk.Combobox(sidebar, textvariable=self.session_var, state="readonly",
                                        style="Visor.TCombobox", font=("DejaVu Sans", 10))
@@ -183,26 +201,28 @@ class Visor:
         self.session_box.bind("<<ComboboxSelected>>", self.on_session_changed)
         tk.Checkbutton(sidebar, text=self.t("follow"), variable=self.follow, command=self.follow_changed,
             bg=PANEL, fg=INK, selectcolor=CARD, activebackground=PANEL, activeforeground=INK,
-            font=("DejaVu Sans", 9), highlightthickness=0, cursor="hand2").pack(anchor="w", padx=17, pady=15)
+            font=("DejaVu Sans", 9), highlightthickness=2, highlightbackground=PANEL, highlightcolor=ACCENT, cursor="hand2").pack(anchor="w", padx=17, pady=15)
         history_title = tk.Frame(sidebar, bg=PANEL)
         history_title.pack(fill="x", padx=20, pady=(5, 10))
         self._label(history_title, self.t("history"), fg=MUTED, size=8, weight="bold").pack(side="left")
+        # History moves with ↑ ↓ here; the arrows at the bottom of the figure are for slides only.
+        self._chip(history_title, "↓", lambda: self.step(1)).pack(side="right")
+        self._chip(history_title, "↑", lambda: self.step(-1)).pack(side="right", padx=(0, 3))
         self.count_label = self._label(history_title, "0", fg=MUTED, size=8)
-        self.count_label.pack(side="right")
+        self.count_label.pack(side="right", padx=(0, 8))
         periods = tk.Frame(sidebar, bg=PANEL)
         periods.pack(fill="x", padx=17, pady=(0, 10))
         self.period_buttons = {}
         for key in PERIODS:
-            button = tk.Button(periods, text=self.t(f"period_{key}"), command=lambda value=key: self.set_period(value), relief="flat", bd=0,
-                               highlightthickness=0, cursor="hand2", font=("DejaVu Sans", 8), padx=9, pady=4)
-            button.pack(side="left", padx=(0, 5))
+            button = self._chip(periods, self.t(f"period_{key}"), lambda value=key: self.set_period(value))
+            button.pack(side="left", padx=(0, 3))
             self.period_buttons[key] = button
         self.paint_periods()
         hist_area = tk.Frame(sidebar, bg=PANEL)
         hist_area.pack(fill="both", expand=True, padx=(10, 0))
         self.history_canvas = tk.Canvas(hist_area, bg=PANEL, highlightthickness=0, bd=0, width=244)
         self.history_canvas.pack(side="left", fill="both", expand=True)
-        scroll = ttk.Scrollbar(hist_area, orient="vertical", command=self.history_canvas.yview)
+        scroll = ttk.Scrollbar(hist_area, orient="vertical", command=self.history_canvas.yview, style="Visor.Vertical.TScrollbar")
         scroll.pack(side="right", fill="y")
         self.history_canvas.configure(yscrollcommand=scroll.set)
         self.history_frame = tk.Frame(self.history_canvas, bg=PANEL)
@@ -215,9 +235,10 @@ class Visor:
         self._build_chat(body)
         heading = tk.Frame(main, bg=PAPER)
         heading.pack(fill="x", padx=28, pady=(25, 15))
-        self.title_label = self._label(heading, self.t("welcome_title"), fg=DARK, size=19, weight="bold", anchor="w")
+        self.title_label = self._label(heading, self.t("welcome_title"), fg=DARK, size=19, weight="bold", anchor="w",
+                                       justify="left", wraplength=650)
         self.title_label.pack(fill="x")
-        self.caption_label = self._label(heading, self.t("welcome_caption"), fg="#63766c", size=10, anchor="w", justify="left", wraplength=650)
+        self.caption_label = self._label(heading, self.t("welcome_caption"), fg=SOFT, size=10, anchor="w", justify="left", wraplength=650)
         self.caption_label.pack(fill="x", pady=(7, 0))
         self.new_button = self._button(main, self.t("new_images"), self.show_latest, primary=True)
         self.canvas = tk.Canvas(main, bg="#e6ebe3", highlightthickness=0, cursor="fleur")
@@ -232,10 +253,6 @@ class Visor:
         self.canvas.bind("<Button-3>", self.mark)
         controls = tk.Frame(main, bg=PAPER)
         controls.pack(fill="x", padx=23, pady=(12, 7))
-        self._button(controls, "←", lambda: self.step(1), light=True).pack(side="left")
-        self._button(controls, "→", lambda: self.step(-1), light=True).pack(side="left", padx=(5, 13))
-        self.position_label = self._label(controls, "", fg="#63766c", size=9)
-        self.position_label.pack(side="left")
         self.slide_bar = tk.Frame(controls, bg=PAPER)
         self._button(self.slide_bar, "‹", lambda: self.turn(-1), light=True).pack(side="left")
         self.slide_label = self._label(self.slide_bar, "", fg=DARK, size=9, weight="bold", width=17)
@@ -247,10 +264,8 @@ class Visor:
         self.zoom_label = self._label(controls, "100 %", fg=DARK, size=9, width=7)
         self.zoom_label.pack(side="right")
         self._button(controls, "−", lambda: self.zoom(1 / 1.2), light=True).pack(side="right")
-        self.detail_label = self._label(main, self.t("idle_detail"), fg="#748277", size=8, anchor="w")
+        self.detail_label = self._label(main, self.t("idle_detail"), fg=FAINT, size=8, anchor="w")
         self.detail_label.pack(fill="x", padx=25, pady=(2, 16))
-        if self.chat_open:
-            self.chat.pack(side="right", fill="y", before=self.main)
 
     def _build_chat(self, body):
         self.chat = tk.Frame(body, bg=PANEL, width=380)
@@ -258,18 +273,17 @@ class Visor:
         self._label(self.chat, self.t("chat_title"), fg=MUTED, size=8, weight="bold").pack(anchor="w", padx=18, pady=(22, 6))
         self.chat_status = self._label(self.chat, "", fg=MUTED, size=8, anchor="w", justify="left", wraplength=340)
         self.chat_status.pack(fill="x", padx=18)
-        actions = tk.Frame(self.chat, bg=PANEL)
-        actions.pack(fill="x", padx=16, pady=(10, 8))
+        actions = self.chat_actions = tk.Frame(self.chat, bg=PANEL)
         self._button(actions, self.t("new_thread"), self.new_thread).pack(side="left")
         self.copy_button = self._button(actions, self.t("copy_command"), self.copy_command)
         self.copy_button.pack(side="left", padx=6)
-        bottom = tk.Frame(self.chat, bg=PANEL)
-        bottom.pack(side="bottom", fill="x", padx=16, pady=(8, 16))
+        bottom = self.chat_bottom = tk.Frame(self.chat, bg=PANEL)
         self.point_bar = tk.Frame(bottom, bg=PANEL)
         self.point_label = self._label(self.point_bar, "", fg=ACCENT, size=8, anchor="w")
         self.point_label.pack(side="left")
         tk.Button(self.point_bar, text=self.t("remove"), command=self.clear_point, bg=PANEL, fg=MUTED, activebackground=PANEL,
-                  activeforeground=INK, relief="flat", bd=0, highlightthickness=0, cursor="hand2",
+                  activeforeground=INK, relief="flat", bd=0, highlightthickness=2, highlightbackground=PANEL,
+                  highlightcolor=ACCENT, cursor="hand2",
                   font=("DejaVu Sans", 8, "underline")).pack(side="right")
         self.chat_input = tk.Text(bottom, height=4, wrap="word", bg=CARD, fg=INK, insertbackground=INK, relief="flat",
                                   font=("DejaVu Sans", 10), padx=8, pady=6, highlightthickness=1,
@@ -280,7 +294,6 @@ class Visor:
         self.send_button.pack(anchor="e", pady=(8, 0))
         self.chat_log = tk.Text(self.chat, wrap="word", bg=CARD, fg=INK, relief="flat", font=("DejaVu Sans", 10),
                                 padx=10, pady=10, state="disabled", highlightthickness=0, cursor="arrow", takefocus=0)
-        self.chat_log.pack(fill="both", expand=True, padx=16)
         self.chat_log.tag_configure("user", foreground=ACCENT, font=("DejaVu Sans", 10, "bold"), spacing1=8)
         self.chat_log.tag_configure("assistant", spacing1=4)
         self.chat_log.tag_configure("tool", foreground=MUTED, font=("DejaVu Sans", 8))
@@ -288,6 +301,47 @@ class Visor:
         self.chat_log.tag_configure("note", foreground=MUTED, font=("DejaVu Sans", 9, "italic"))
         self.chat_log.tag_configure("bold", font=("DejaVu Sans", 10, "bold"))
         self.chat_log.tag_configure("code", font=("DejaVu Sans Mono", 9), foreground="#cfe6dd")
+
+    def show_chat_controls(self, visible):
+        """Without a session to ask, the panel shows only its explanation."""
+        for widget in (self.chat_actions, self.chat_bottom, self.chat_log):
+            widget.pack_forget()
+        if visible:
+            self.chat_actions.pack(fill="x", padx=16, pady=(10, 8))
+            self.chat_bottom.pack(side="bottom", fill="x", padx=16, pady=(8, 16))
+            self.chat_log.pack(fill="both", expand=True, padx=16)
+
+    def apply_chat_layout(self):
+        if self.chat_open:
+            self.root.minsize(CHAT_MIN_WINDOW, 540)
+            self.root.update_idletasks()
+            width, height = self.root.winfo_width(), self.root.winfo_height()
+            if width < CHAT_MIN_WINDOW:
+                self.root.geometry(f"{CHAT_MIN_WINDOW}x{max(540, height)}")
+            self.set_chat_width(self.chat_width(max(width, CHAT_MIN_WINDOW)))
+            self.chat.pack(side="right", fill="y", before=self.main)
+        else:
+            self.root.minsize(820, 540)
+            self.chat.pack_forget()
+        chosen = self.chat_open
+        self.ask_button.configure(bg=ACCENT if chosen else CARD, fg=DARK if chosen else INK,
+                                  activebackground="#a6e6d0" if chosen else SELECTED, activeforeground=DARK if chosen else INK,
+                                  highlightcolor=INK if chosen else ACCENT)
+
+    @staticmethod
+    def chat_width(window_width):
+        return max(300, min(380, int(window_width * .3)))
+
+    def resize_chat(self, event):
+        if event.widget is self.root and self.chat_open:
+            width = self.chat_width(event.width)
+            if int(self.chat.cget("width")) != width:
+                self.set_chat_width(width)
+
+    def set_chat_width(self, width):
+        # The status text wraps inside the panel, whatever width the panel has.
+        self.chat.configure(width=width)
+        self.chat_status.configure(wraplength=width - 40)
 
     def _icon(self):
         icon = Image.new("RGBA", (64, 64), BG)
@@ -310,6 +364,8 @@ class Visor:
                 label = value
             self.session_labels.append(label)
         self.session_box["values"] = self.session_labels
+        if not self.sessions:
+            self.session_var.set(self.t("no_projects"))
         for i, row in enumerate(self.sessions):
             if row["session"] == self.session:
                 self.session_box.current(i)
@@ -327,8 +383,8 @@ class Visor:
         self.refresh_history()
         if self.items:
             self.select(self.items[0], rebuild=False)
-        elif self.current and self.current["session"] != session:
-            self.clear_view()
+        elif self.current:
+            self.clear_view()  # nothing of this project in the chosen period
         self.new_button.pack_forget()
 
     def clear_view(self):
@@ -340,7 +396,7 @@ class Visor:
         self.title_label.configure(text=self.t("nothing_title"))
         self.caption_label.configure(text=self.t("nothing_caption"))
         self.detail_label.configure(text="")
-        self.position_label.configure(text="")
+        self.count_label.configure(text=str(len(self.items)))
         self.slide_bar.pack_forget()
         self.load_chat()
         self.draw()
@@ -357,6 +413,12 @@ class Visor:
         self.store.set_setting("period", period)
         self.paint_periods()
         self.refresh_history()
+        # Keep the canvas consistent with the list: never show an image the filter hides.
+        if self.current and not any(entry(item) == entry(self.current) for item in self.items):
+            if self.items:
+                self.select(self.items[0], rebuild=False)
+            else:
+                self.clear_view()
 
     def paint_periods(self):
         for key, button in self.period_buttons.items():
@@ -371,6 +433,7 @@ class Visor:
             child.destroy()
         self.thumbnails.clear()
         self.cards = {}
+        versions = self.store.versions(self.session) if self.session else {}
         for index, item in enumerate(self.items):
             active = self.current and entry(item) == entry(self.current)
             bg = SELECTED if active else CARD
@@ -394,11 +457,15 @@ class Visor:
             self._label(text, item["title"], bg=bg, size=9, weight="bold", anchor="w", wraplength=116, justify="left").pack(anchor="w")
             stamp = datetime.fromtimestamp(item["created"]).strftime("%d %b · %H:%M:%S")
             self._label(text, stamp, fg=MUTED, bg=bg, size=8).pack(anchor="w", pady=(4, 0))
-            tag = self.t("latest") if index == 0 else self.t("version", n=len(self.items) - index)
+            parts = [self.t("latest")] if index == 0 else []
+            number, total = versions.get(entry(item), (1, 1))
+            if total > 1:  # a version only when the same file was shown more than once
+                parts.append(self.t("version", n=number))
             if item.get("deck"):
-                tag += "  ·  " + (self.t("slides_one") if item["pages"] == 1 else self.t("slides_many", n=item["pages"]))
-            self._label(card, tag, fg=ACCENT if index == 0 else MUTED,
-                        bg=bg, size=7, anchor="w").pack(anchor="w", pady=(6, 0))
+                parts.append(self.t("slides_one") if item["pages"] == 1 else self.t("slides_many", n=item["pages"]))
+            if parts:
+                self._label(card, "  ·  ".join(parts), fg=ACCENT if index == 0 else MUTED,
+                            bg=bg, size=7, anchor="w").pack(anchor="w", pady=(6, 0))
             def bind_tree(widget, chosen=item):
                 widget.bind("<Button-1>", lambda event, value=chosen: self.select(value))
                 widget.bind("<Button-4>", lambda event: self.history_canvas.yview_scroll(-3, "units"))
@@ -430,7 +497,9 @@ class Visor:
         self.title_label.configure(text=item["title"])
         self.caption_label.configure(text=item["caption"] or Path(item["source"]).name)
         self.root.title(f"{item['title']} · Visor")
-        self.detail_label.configure(text=f"{item['width']} × {item['height']} px   ·   {item['source']}")
+        source = Path(item["source"])
+        # File name before folder, so a long path truncates the folder and not the name.
+        self.detail_label.configure(text=f"{item['width']} × {item['height']} px   ·   {source.name}   ·   {source.parent}")
         if self.pages:
             self.slide_label.configure(text=self.t("slide", page=item["page"], pages=len(self.pages)))
             self.slide_bar.pack(side="left", padx=(24, 0))
@@ -443,7 +512,8 @@ class Visor:
                 color = SELECTED if key == entry(item) else CARD
                 self._recolor(card, color)
         index = next((i for i, value in enumerate(self.items) if entry(value) == entry(item)), 0)
-        self.position_label.configure(text=f"{len(self.items) - index} / {len(self.items)}")
+        shown = any(entry(value) == entry(item) for value in self.items)
+        self.count_label.configure(text=f"{len(self.items) - index} / {len(self.items)}" if shown else str(len(self.items)))
         if self.chat_entry != entry(item):
             self.load_chat()
         self.draw()
@@ -458,6 +528,7 @@ class Visor:
             self.root.after_cancel(self.pending_draw)
         self.pending_draw = self.root.after(45, self.draw)
         self.caption_label.configure(wraplength=max(300, self.canvas.winfo_width() - 20))
+        self.title_label.configure(wraplength=max(240, self.canvas.winfo_width() - 20))
 
     def draw(self):
         self.pending_draw = None
@@ -468,7 +539,7 @@ class Visor:
             canvas.create_oval(width / 2 - 28, height / 2 - 70, width / 2 + 28, height / 2 - 14, fill="#d3e3d6", outline="")
             canvas.create_text(width / 2, height / 2 - 42, text="V", fill="#507d65", font=("DejaVu Sans", 24, "bold"))
             canvas.create_text(width / 2, height / 2 + 10, text=self.t("empty_canvas"), fill=DARK, font=("DejaVu Sans", 15, "bold"))
-            canvas.create_text(width / 2, height / 2 + 46, text=self.t("empty_canvas_hint"), fill="#687e6d", font=("DejaVu Sans", 10))
+            canvas.create_text(width / 2, height / 2 + 46, text=self.t("empty_canvas_hint"), fill="#596c5d", font=("DejaVu Sans", 10))
             return
         if self.fit:
             self.scale = min((max(width, 80) - 36) / self.original.width,
@@ -617,9 +688,11 @@ class Visor:
         y = (event.y - self.image_origin[1]) / self.scale
         if not (0 <= x < self.original.width and 0 <= y < self.original.height):
             return
-        self.point = (int(x), int(y))
         if not self.chat_open:
             self.toggle_chat()
+        if not self.current.get("agent_session"):
+            return
+        self.point = (int(x), int(y))
         self.show_point()
         self.draw()
         self.chat_input.focus_set()
@@ -639,11 +712,9 @@ class Visor:
     def toggle_chat(self):
         self.chat_open = not self.chat_open
         self.store.set_setting("chat_open", self.chat_open)
-        if self.chat_open:
-            self.chat.pack(side="right", fill="y", before=self.main)
+        self.apply_chat_layout()
+        if self.chat_open and self.current and self.current.get("agent_session"):
             self.chat_input.focus_set()
-        else:
-            self.chat.pack_forget()
         self.schedule_draw()
 
     def load_chat(self):
@@ -654,6 +725,7 @@ class Visor:
         self.chat_log.configure(state="normal")
         self.chat_log.delete("1.0", "end")
         self.chat_log.configure(state="disabled")
+        self.show_chat_controls(bool(item and item.get("agent_session")))
         if not item:
             self.chat_status.configure(text=self.t("chat_pick"))
         elif not item.get("agent_session"):

@@ -83,10 +83,10 @@ XDG directories are respected. `VISOR_DATA_DIR` and `VISOR_RUNTIME_DIR` isolate 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v
+xvfb-run -a python3 -m unittest discover -s tests -v
 ```
 
-The graphical integration tests are skipped without desktop access. With a desktop they exercise the real command, simultaneous startup, reuse, updates, closing and restoring. If you have Codex's skill-creator, its `quick_validate.py` checks `skills/agent-visor`.
+The window tests open many short-lived windows, so run them on a virtual display (`xvfb-run`, from the `xvfb` package) to keep them off your desktop. Without any display they are skipped. With a desktop they exercise the real command, simultaneous startup, reuse, updates, closing and restoring. If you have Codex's skill-creator, its `quick_validate.py` checks `skills/agent-visor`.
 
 To uninstall, run `visor stop` and delete the command, the two skill links and `~/.local/share/applications/agent-visor.desktop`. The data is kept separately, so you can keep it.
 
