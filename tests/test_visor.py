@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import subprocess
@@ -204,6 +205,35 @@ class ChatTests(unittest.TestCase):
             self.assertIn("--strict-mcp-config", args)
             self.assertEqual(args[-1], args[-1].strip())
 
+    def test_point_is_marked_for_the_fork(self):
+        with tempfile.TemporaryDirectory(prefix="av-point-") as directory:
+            snapshot = Path(directory) / "fig.png"
+            Image.new("RGB", (400, 300), "white").save(snapshot)
+            marked, zoom = chat.mark_point(snapshot, 100, 50, Path(directory) / "points")
+
+            def red_near(path, x, y, reach):
+                with Image.open(path) as image:
+                    pixels = image.convert("RGB").load()
+                    return any(pixels[i, j][0] > 200 and pixels[i, j][1] < 110
+                               for i in range(max(0, x - reach), min(image.width, x + reach))
+                               for j in range(max(0, y - reach), min(image.height, y + reach)))
+            self.assertTrue(red_near(marked, 100, 50, 14))
+            self.assertFalse(red_near(marked, 300, 220, 30))
+            with Image.open(zoom) as image:
+                self.assertEqual(max(image.size), 768)
+                factor = 768 / 220
+            self.assertTrue(red_near(zoom, round(100 * factor), round(50 * factor), 26))
+            item = dict(title="t", source="/s.png", snapshot=str(snapshot), width=400, height=300)
+            text = chat.prompt("¿Qué es esto?", item, True, dict(x=100, y=50, marked=marked, zoom=zoom))
+            self.assertIn("x=100, y=50", text)
+            self.assertIn(marked, text)
+            self.assertIn(zoom, text)
+            self.assertTrue(text.endswith("¿Qué es esto?"))
+        with patch("agent_visor.chat.claude_binary", return_value="claude"):
+            args = chat.command("orig", None, "pregunta", ["/data/images", "/data/points"])
+        self.assertEqual(args[-1], "pregunta")
+        self.assertEqual([args[i + 1] for i, a in enumerate(args) if a == "--add-dir"], ["/data/images", "/data/points"])
+
     def test_stream_events(self):
         lines = [
             {"type": "system", "subtype": "init", "session_id": "abc"},
@@ -212,7 +242,7 @@ class ChatTests(unittest.TestCase):
             {"type": "result", "subtype": "success", "is_error": False, "result": "Respuesta"},
         ]
         found = [event for line in lines for event in chat.events(json.dumps(line))]
-        self.assertEqual(found, [("session", "abc"), ("tool", "Read /x.py"), ("text", "Respuesta"), ("done", "")])
+        self.assertEqual(found, [("session", "abc"), ("tool", "Read x.py"), ("text", "Respuesta"), ("done", "")])
         self.assertEqual(chat.events("not json"), [])
         failed = chat.events(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True}))
         self.assertEqual(failed[0][0], "error")
@@ -443,7 +473,26 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                     app.append_chat("assistant", "La **clave** es `x`.")
                     self.assertIn("La clave es x.", app.chat_log.get("1.0", "end"))
                     self.assertEqual(str(app.copy_button.cget("state")), "normal")
-                    first, second = [json.loads(line) for line in calls.read_text().splitlines()]
+                    width, height = app.canvas.winfo_width(), app.canvas.winfo_height()
+                    app.canvas.event_generate("<Button-3>", x=width // 2, y=height // 2)
+                    root.update()
+                    self.assertTrue(abs(app.point[0] - 150) <= 2 and abs(app.point[1] - 100) <= 2, app.point)
+                    self.assertTrue(app.canvas.find_withtag("marker"))
+                    self.assertTrue(app.point_bar.winfo_ismapped())
+                    app.chat_input.insert("1.0", "¿Qué es esto?")
+                    app.send_or_stop()
+                    self.assertIsNone(app.point)
+                    deadline = time.monotonic() + 10
+                    while app.runs and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(.02)
+                    self.assertTrue(store.messages(app.thread["id"])[-3]["text"].startswith("◉ ("))
+                    first, second, third = [json.loads(line) for line in calls.read_text().splitlines()]
+                    self.assertIn("y=", third[-1])
+                    marks = re.findall(r"\((/[^();]+\.png)\)", third[-1])
+                    self.assertEqual(len(marks), 2)
+                    self.assertTrue(all(Path(path).exists() for path in marks))
+                    self.assertIn("--add-dir", third)
                     self.assertIn("--fork-session", first)
                     self.assertEqual(first[first.index("--resume") + 1], "31cde43d-3856-47e7-990f-9d87748f1e6d")
                     self.assertNotIn("--fork-session", second)

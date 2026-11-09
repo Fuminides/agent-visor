@@ -25,7 +25,7 @@ Si regeneras el PDF (o cualquier archivo de la presentación) con **Seguir lo nu
 
 ## Preguntar a la sesión
 
-Cuando Claude Code muestra una imagen, `visor show` guarda también qué sesión la mostró (`CLAUDE_CODE_SESSION_ID`). El botón **Preguntar** abre un panel para hacer preguntas sobre la imagen o presentación seleccionada a esa sesión, sin interrumpirla. La primera pregunta crea una bifurcación (`claude --resume <id> --fork-session`) y las siguientes la continúan, así que recuerda lo hablado. **Nuevo hilo** empieza otra bifurcación. **Copiar comando** copia `claude --resume <bifurcación>` para seguir esa conversación en la terminal. Mientras responde, **Enviar** pasa a ser **Detener**.
+Cuando Claude Code muestra una imagen, `visor show` guarda también qué sesión la mostró (`CLAUDE_CODE_SESSION_ID`). El botón **Preguntar** abre un panel para hacer preguntas sobre la imagen o presentación seleccionada a esa sesión, sin interrumpirla. La primera pregunta crea una bifurcación (`claude --resume <id> --fork-session`) y las siguientes la continúan, así que recuerda lo hablado. **Nuevo hilo** empieza otra bifurcación. Con clic derecho en la figura marcas un punto: la siguiente pregunta lleva sus coordenadas y dos imágenes que el modelo mira con `Read`, la figura con el punto rodeado en rojo y una ampliación alrededor. Se guardan en `~/.local/share/agent-visor/points/`. **Copiar comando** copia `claude --resume <bifurcación>` para seguir esa conversación en la terminal. Mientras responde, **Enviar** pasa a ser **Detener**.
 
 La bifurcación solo puede leer y buscar (`Read`, `Grep`, `Glob`, sin servidores MCP): no edita archivos ni ejecuta comandos, porque desde la ventana nadie puede aprobar permisos. La sesión original no cambia. La bifurcación copia la sesión tal como está al preguntar, así que también conoce lo que pasó después de la imagen. Cada versión de una figura tiene su propio hilo. Las imágenes que no vienen de Claude Code (de Codex o abiertas a mano) no tienen sesión a la que preguntar.
 
@@ -45,6 +45,7 @@ La primera llamada abre la ventana. Las siguientes actualizan su contenido sin e
 - Re Pág/Av Pág: diapositiva anterior/siguiente (sirve con mandos de presentación).
 - Flechas arriba/abajo y botones ← →: entrada más reciente/anterior del historial.
 - `Ctrl+O`: abrir imágenes manualmente.
+- Clic derecho en la imagen: señala un punto para preguntar por el elemento que hay ahí. Abre el panel de preguntas si está cerrado.
 - En el panel de preguntas: `Intro` envía y `Mayús+Intro` añade una línea. Mientras escribes, los atajos de la ventana no actúan; haz clic en la imagen para recuperarlos.
 
 Admite PDF, PNG, JPEG, WebP, GIF (primer fotograma), TIFF, BMP e ICO, hasta 24 megapíxeles o 100 MB por archivo. Exporta los SVG a PNG o PDF. La ventana muestra hasta 200 entradas recientes por proyecto; las anteriores siguen guardadas y se pueden consultar con `history --limit 1000`.

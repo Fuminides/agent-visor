@@ -6,10 +6,14 @@ import os
 from pathlib import Path
 import re
 import shutil
+import uuid
+
+from PIL import Image, ImageDraw
 
 SESSION_ID = re.compile(r"^[0-9a-fA-F-]{36}$")
 # The fork can look at the project but never change it: no Bash, no edits, no MCP servers.
 READ_ONLY_TOOLS = "Read,Grep,Glob"
+RED = (229, 72, 77)
 
 
 def claude_binary():
@@ -50,19 +54,59 @@ def clean_env():
     return {key: value for key, value in os.environ.items() if key not in SESSION_VARIABLES}
 
 
-def command(session_id, fork_id, prompt):
-    """First question forks the original session; later ones continue that fork."""
+def command(session_id, fork_id, prompt, readable=()):
+    """First question forks the original session; later ones continue that fork.
+    readable: folders outside the project the fork may read (Visor's snapshots and marked points)."""
     args = [claude_binary(), "-p", "--resume", fork_id or session_id]
     if not fork_id:
         args.append("--fork-session")
-    return args + ["--tools", READ_ONLY_TOOLS, "--strict-mcp-config", "--permission-mode", "dontAsk",
-                   "--output-format", "stream-json", "--verbose", prompt]
+    args += ["--tools", READ_ONLY_TOOLS, "--strict-mcp-config", "--permission-mode", "dontAsk"]
+    for folder in readable:
+        args += ["--add-dir", str(folder)]
+    # The prompt goes last, after a single-value option, so no list option swallows it.
+    return args + ["--output-format", "stream-json", "--verbose", prompt]
 
 
-def prompt(question, item, first):
+def ring(draw, x, y, radius, width):
+    """Red circle with a white halo, visible on light and dark figures."""
+    box = (x - radius, y - radius, x + radius, y + radius)
+    draw.ellipse(box, outline="white", width=width + 3)
+    draw.ellipse(box, outline=RED, width=width)
+
+
+def mark_point(snapshot, x, y, directory):
+    """Save the figure with the point circled and a zoom around it, for the fork to look at."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with Image.open(snapshot) as source:
+        image = source.convert("RGB")
+    side = max(image.size)
+    marked = image.copy()
+    ring(ImageDraw.Draw(marked), x, y, max(10, round(side * .018)), max(3, round(side * .004)))
+    half = max(120, round(side * .125))
+    box = (max(0, x - half), max(0, y - half), min(image.width, x + half), min(image.height, y + half))
+    factor = max(1, 768 / max(box[2] - box[0], box[3] - box[1]))
+    zoom = image.crop(box)
+    zoom = zoom.resize((round(zoom.width * factor), round(zoom.height * factor)), Image.Resampling.LANCZOS)
+    ring(ImageDraw.Draw(zoom), (x - box[0]) * factor, (y - box[1]) * factor, 22, 4)
+    name = uuid.uuid4().hex
+    paths = directory / f"{name}.png", directory / f"{name}.zoom.png"
+    marked.save(paths[0])
+    zoom.save(paths[1])
+    image.close()
+    return tuple(map(str, paths))
+
+
+def prompt(question, item, first, point=None):
     where = f"«{item['title']}» ({item['source']}; copia guardada en {item['snapshot']})"
     if item.get("deck"):
         where += f", diapositiva {item['page']} de {item['pages']}"
+    if point:
+        question = (f"[El usuario ha señalado un punto de la figura: x={point['x']}, y={point['y']} px de "
+                    f"{item['width']}×{item['height']}, origen arriba a la izquierda ({100 * point['x'] / item['width']:.0f} % "
+                    f"del ancho, {100 * point['y'] / item['height']:.0f} % del alto). Pregunta por el elemento que hay en ese "
+                    f"punto o cerca. Mira con Read la figura con el punto rodeado en rojo ({point['marked']}) y la ampliación "
+                    f"alrededor del punto ({point['zoom']}).]\n\n{question}")
     if not first:
         return f"[Desde Visor · el usuario mira {where}]\n\n{question}"
     return ("[Mensaje enviado desde Visor] Esta conversación es una bifurcación de tu sesión, abierta desde la ventana "
@@ -88,7 +132,7 @@ def events(line):
                 found.append(("text", block["text"].strip()))
             elif block.get("type") == "tool_use":
                 arguments = block.get("input", {})
-                target = arguments.get("file_path") or arguments.get("pattern") or ""
+                target = Path(arguments["file_path"]).name if arguments.get("file_path") else arguments.get("pattern", "")
                 found.append(("tool", f"{block.get('name', 'Herramienta')} {target}".strip()))
         return found
     if kind == "result":

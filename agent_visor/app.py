@@ -65,6 +65,8 @@ class Visor:
         self.chat_open = store.setting("chat_open", False)
         self.chat_entry = None
         self.thread = None
+        self.point = None
+        self.image_origin = (0, 0)
         self.runs = {}
         root.title("Visor · Tu espacio visual")
         root.geometry(store.setting("geometry", "1120x760"))
@@ -196,6 +198,7 @@ class Visor:
         self.canvas.bind("<ButtonPress-1>", self.pan_start)
         self.canvas.bind("<B1-Motion>", self.pan_move)
         self.canvas.bind("<Double-Button-1>", lambda event: self.set_fit())
+        self.canvas.bind("<Button-3>", self.mark)
         controls = tk.Frame(main, bg=PAPER)
         controls.pack(fill="x", padx=23, pady=(12, 7))
         self._button(controls, "←", lambda: self.step(1), light=True).pack(side="left")
@@ -229,6 +232,12 @@ class Visor:
         self.copy_button.pack(side="left", padx=6)
         bottom = tk.Frame(self.chat, bg=PANEL)
         bottom.pack(side="bottom", fill="x", padx=16, pady=(8, 16))
+        self.point_bar = tk.Frame(bottom, bg=PANEL)
+        self.point_label = self._label(self.point_bar, "", fg=ACCENT, size=8, anchor="w")
+        self.point_label.pack(side="left")
+        tk.Button(self.point_bar, text="Quitar", command=self.clear_point, bg=PANEL, fg=MUTED, activebackground=PANEL,
+                  activeforeground=INK, relief="flat", bd=0, highlightthickness=0, cursor="hand2",
+                  font=("DejaVu Sans", 8, "underline")).pack(side="right")
         self.chat_input = tk.Text(bottom, height=4, wrap="word", bg=CARD, fg=INK, insertbackground=INK, relief="flat",
                                   font=("DejaVu Sans", 10), padx=8, pady=6, highlightthickness=1,
                                   highlightbackground="#2a3b40", highlightcolor=ACCENT)
@@ -293,7 +302,8 @@ class Visor:
         """Nothing of this project falls in the chosen period: show an empty canvas, not another project's image."""
         if self.original:
             self.original.close()
-        self.current, self.original, self.pages = None, None, []
+        self.current, self.original, self.pages, self.point = None, None, [], None
+        self.show_point()
         self.title_label.configure(text="Nada en este periodo")
         self.caption_label.configure(text="Elige «Todo» en el historial para ver las imágenes anteriores.")
         self.detail_label.configure(text="")
@@ -370,6 +380,8 @@ class Visor:
         if self.original:
             self.original.close()
         self.current = item
+        self.point = None
+        self.show_point()
         if not item.get("deck"):
             self.pages = []
         elif not self.pages or self.pages[0]["deck"] != item["deck"]:
@@ -433,6 +445,7 @@ class Visor:
         scaled_w, scaled_h = self.original.width * self.scale, self.original.height * self.scale
         left = (width - scaled_w) / 2 + self.pan[0]
         top = (height - scaled_h) / 2 + self.pan[1]
+        self.image_origin = (left, top)
         canvas.create_rectangle(left + 3, top + 4, left + scaled_w + 3, top + scaled_h + 4, fill="#cdd5ca", outline="")
         canvas.create_rectangle(left, top, left + scaled_w, top + scaled_h, fill="white", outline="")
         x0 = max(0, -left / self.scale)
@@ -446,6 +459,10 @@ class Visor:
             rendered = crop.resize(size, Image.Resampling.LANCZOS)
             self.photo = ImageTk.PhotoImage(rendered)
             canvas.create_image(left + box[0] * self.scale, top + box[1] * self.scale, image=self.photo, anchor="nw")
+        if self.point:
+            x, y = left + self.point[0] * self.scale, top + self.point[1] * self.scale
+            canvas.create_oval(x - 11, y - 11, x + 11, y + 11, outline="white", width=6, tags="marker")
+            canvas.create_oval(x - 11, y - 11, x + 11, y + 11, outline="#e5484d", width=3, tags="marker")
         self.zoom_label.configure(text=f"{round(self.scale * 100)} %")
 
     def set_fit(self):
@@ -558,6 +575,33 @@ class Visor:
         finally:
             self.root.after(900, self.watch)
 
+    def mark(self, event):
+        """Right click: point at an element of the figure to ask about it."""
+        if not self.original:
+            return
+        x = (event.x - self.image_origin[0]) / self.scale
+        y = (event.y - self.image_origin[1]) / self.scale
+        if not (0 <= x < self.original.width and 0 <= y < self.original.height):
+            return
+        self.point = (int(x), int(y))
+        if not self.chat_open:
+            self.toggle_chat()
+        self.show_point()
+        self.draw()
+        self.chat_input.focus_set()
+
+    def show_point(self):
+        if self.point:
+            self.point_label.configure(text=f"◉  Punto marcado: x={self.point[0]}, y={self.point[1]} px")
+            self.point_bar.pack(fill="x", pady=(0, 6), before=self.chat_input)
+        else:
+            self.point_bar.pack_forget()
+
+    def clear_point(self):
+        self.point = None
+        self.show_point()
+        self.draw()
+
     def toggle_chat(self):
         self.chat_open = not self.chat_open
         self.store.set_setting("chat_open", self.chat_open)
@@ -587,7 +631,8 @@ class Visor:
             for message in messages:
                 self.append_chat(message["role"], message["text"])
             if not messages:
-                self.append_chat("note", "Pregunta lo que quieras sobre esta figura. La primera pregunta crea la bifurcación.")
+                self.append_chat("note", "Pregunta lo que quieras sobre esta figura. La primera pregunta crea la bifurcación. "
+                                         "Con clic derecho en la figura señalas un elemento concreto.")
         self.update_chat_buttons()
 
     def append_chat(self, role, text):
@@ -650,10 +695,19 @@ class Visor:
             self.chat_log.delete("1.0", "end")
             self.chat_log.configure(state="disabled")
         self.chat_input.delete("1.0", "end")
-        self.store.add_message(thread["id"], "user", question)
-        self.append_chat("user", question)
+        point, self.point = self.point, None
+        shown = f"◉ ({point[0]}, {point[1]})  {question}" if point else question
+        self.store.add_message(thread["id"], "user", shown)
+        self.append_chat("user", shown)
+        if point:
+            self.show_point()
+            self.draw()
         try:
-            args = chat.command(item["agent_session"], thread["fork"], chat.prompt(question, item, not thread["fork"]))
+            if point:
+                marked, zoom = chat.mark_point(item["snapshot"], *point, self.store.directory / "points")
+                point = dict(x=point[0], y=point[1], marked=marked, zoom=zoom)
+            readable = [self.store.assets, self.store.directory / "points"]
+            args = chat.command(item["agent_session"], thread["fork"], chat.prompt(question, item, not thread["fork"], point), readable)
             errors = tempfile.TemporaryFile()
             process = subprocess.Popen(args, cwd=chat.session_cwd(item["agent_session"], item.get("agent_cwd")),
                                        env=chat.clean_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
