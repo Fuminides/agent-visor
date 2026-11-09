@@ -590,10 +590,20 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                 with store.connect() as conn:
                     conn.execute("UPDATE images SET created = created - 7200")
                 app.set_period("hour")
+                root.update()
                 self.assertIsNone(app.current)
                 self.assertEqual(app.title_label.cget("text"), "Nothing in this period")
-                app.set_period("all")
-                self.assertIsNotNone(app.select(app.items[0]) or app.current)
+                self.assertEqual(app.zoom_bar.winfo_manager(), "")  # no zoom without an image
+                self.assertTrue(app.show_all_button.winfo_ismapped())
+                app.show_all_button.invoke()
+                root.update()
+                self.assertEqual(app.period, "all")
+                self.assertEqual(app.current["id"], items[-1]["id"])
+                self.assertEqual(app.zoom_bar.winfo_manager(), "pack")
+                # At the smallest window the detail line stays inside the window.
+                root.geometry("820x540")
+                root.update()
+                self.assertLessEqual(app.detail_label.winfo_y() + app.detail_label.winfo_height(), app.main.winfo_height())
                 # Same with the filter already on when the project is (re)selected.
                 app.period = "hour"
                 app.select_session("Fix")
@@ -604,6 +614,88 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                 root.update()
                 self.assertLessEqual(int(app.chat_status.cget("wraplength")), int(app.chat.cget("width")) - 36)
                 app.toggle_chat()
+            finally:
+                root.destroy()
+
+    def test_second_review_tab_order_running_stop_and_queued_position(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            directory = Path(directory)
+            slow = directory / "claude"
+            slow.write_text(f"#!{sys.executable}\nimport json, time\n"
+                            "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'fork-1'}), flush=True)\n"
+                            "time.sleep(60)\n")
+            slow.chmod(0o755)
+            image = directory / "plot.png"
+            Image.new("RGB", (300, 200), "white").save(image)
+            store = Store(directory / "data")
+            first = store.ingest([str(image)], "Q", agent_session="31cde43d-3856-47e7-990f-9d87748f1e6d", agent_cwd=str(directory))[0]
+            root = tk.Tk()
+            try:
+                with patch("agent_visor.chat.claude_binary", return_value=str(slow)):
+                    app = Visor(root, store)
+                    root.update()
+                    # Tab follows the visual order of the zoom controls, left to right.
+                    minus = app.zoom_bar.winfo_children()[0]
+                    order = [minus.cget("text")]
+                    widget = minus
+                    for _ in range(3):
+                        widget = widget.tk_focusNext()
+                        order.append(widget.cget("text"))
+                    self.assertEqual(order, ["−", "+", "1:1", "Fit"])
+                    # While a question runs the panel says so; stopping is a note, not an error.
+                    app.toggle_chat()
+                    app.chat_input.insert("1.0", "Why?")
+                    app.send_or_stop()
+                    root.update()
+                    self.assertTrue(app.working_label.winfo_ismapped())
+                    self.assertEqual(app.send_button.cget("text"), "Stop")
+                    app.send_or_stop()
+                    deadline = time.monotonic() + 10
+                    while app.runs and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(.02)
+                    root.update()
+                    self.assertEqual(store.messages(app.thread["id"])[-1], {"role": "note", "text": "Stopped."})
+                    self.assertFalse(app.working_label.winfo_ismapped())
+                    self.assertEqual(app.send_button.cget("text"), "Send")
+                    # With Follow latest off, a queued image keeps the position "k / n" of the one shown.
+                    app.follow.set(False)
+                    newer = store.ingest([str(image)], "Q")
+                    self.assertTrue(app.dispatch({"action": "received", "items": newer})["queued"])
+                    root.update()
+                    self.assertEqual(app.current["id"], first["id"])
+                    self.assertEqual(app.count_label.cget("text"), "1 / 2")
+            finally:
+                root.destroy()
+
+    def test_bottom_row_fits_beside_the_panel_in_both_languages(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            directory = Path(directory)
+            pdf = directory / "talk.pdf"
+            pages = [Image.new("RGB", (160, 90), "white") for _ in range(12)]
+            pages[0].save(pdf, save_all=True, append_images=pages[1:])
+            store = Store(directory / "data")
+            store.ingest([str(pdf)], "Fit", agent_session="31cde43d-3856-47e7-990f-9d87748f1e6d")
+            store.set_setting("geometry", "820x540")
+            store.set_setting("chat_open", True)
+            root = tk.Tk()
+            try:
+                app = Visor(root, store)
+                for language in ("en", "es"):
+                    app.set_language(language)
+                    for _ in range(9):
+                        app.turn(1)  # "Slide 10 / 12" is the widest label
+                    root.update()
+                    row = app.zoom_bar.master
+                    for bar in (app.slide_bar, app.zoom_bar):
+                        for child in bar.winfo_children():
+                            right = bar.winfo_x() + child.winfo_x() + child.winfo_width()
+                            self.assertLessEqual(right, row.winfo_width(), f"{language}: {child.cget('text')!r} is cut off")
+                    self.assertLess(app.slide_bar.winfo_x() + app.slide_bar.winfo_width(), app.zoom_bar.winfo_x())
             finally:
                 root.destroy()
 

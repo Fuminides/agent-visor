@@ -140,7 +140,7 @@ class Visor:
         return tk.Label(parent, text=text, fg=fg, bg=bg or parent.cget("bg"),
                         font=("DejaVu Sans", size, weight), **kwargs)
 
-    def _button(self, parent, text, command, primary=False, light=False):
+    def _button(self, parent, text, command, primary=False, light=False, compact=False):
         bg = ACCENT if primary else ("#e1e7df" if light else CARD)
         fg = DARK if primary or light else INK
         # A 2 px ring in the parent's colour, which turns visible when the button has keyboard focus.
@@ -148,7 +148,7 @@ class Visor:
                          activebackground="#a6e6d0" if primary else ("#d4ded3" if light else SELECTED),
                          activeforeground=fg, relief="flat", bd=0, highlightthickness=2,
                          highlightbackground=parent.cget("bg"), highlightcolor=DARK if light else (INK if primary else ACCENT),
-                         cursor="hand2", font=("DejaVu Sans", 10), padx=13, pady=7)
+                         cursor="hand2", font=("DejaVu Sans", 10), padx=8 if compact else 13, pady=7)
 
     def _chip(self, parent, text, command, chosen=False, bold=False):
         """Small toggle-like button: filters, languages, history arrows."""
@@ -170,14 +170,15 @@ class Visor:
         brand.pack(side="left")
         self._label(brand, "Visor", size=19, weight="bold", anchor="w").pack(anchor="w")
         self._label(brand, self.t("tagline"), fg=MUTED, size=9).pack(anchor="w")
-        self._button(header, self.t("open_image"), self.open_files).pack(side="right", padx=22)
-        self.ask_button = self._button(header, self.t("ask"), self.toggle_chat)
-        self.ask_button.pack(side="right")
-        languages = tk.Frame(header, bg=BG)
-        languages.pack(side="right", padx=(0, 16))
+        # Right-hand group built left to right, so keyboard Tab moves in the order you read it.
+        actions = tk.Frame(header, bg=BG)
+        actions.pack(side="right", padx=(0, 22))
         for code in i18n.LANGUAGES:
             chosen = code == self.language
-            self._chip(languages, code.upper(), lambda value=code: self.set_language(value), chosen, bold=chosen).pack(side="left")
+            self._chip(actions, code.upper(), lambda value=code: self.set_language(value), chosen, bold=chosen).pack(side="left")
+        self.ask_button = self._button(actions, self.t("ask"), self.toggle_chat)
+        self.ask_button.pack(side="left", padx=(16, 0))
+        self._button(actions, self.t("open_image"), self.open_files).pack(side="left", padx=(8, 0))
         tk.Frame(self.root, height=1, bg="#2a3b40").pack(fill="x")
         body = tk.Frame(self.root, bg=PANEL)
         body.pack(fill="both", expand=True)
@@ -252,20 +253,24 @@ class Visor:
         self.canvas.bind("<Double-Button-1>", lambda event: self.set_fit())
         self.canvas.bind("<Button-3>", self.mark)
         controls = tk.Frame(main, bg=PAPER)
-        controls.pack(fill="x", padx=23, pady=(12, 7))
         self.slide_bar = tk.Frame(controls, bg=PAPER)
-        self._button(self.slide_bar, "‹", lambda: self.turn(-1), light=True).pack(side="left")
-        self.slide_label = self._label(self.slide_bar, "", fg=DARK, size=9, weight="bold", width=17)
+        # The bottom row must fit beside the question panel at the narrowest window: compact buttons, labels sized to text.
+        self._button(self.slide_bar, "‹", lambda: self.turn(-1), light=True, compact=True).pack(side="left")
+        self.slide_label = self._label(self.slide_bar, "", fg=DARK, size=9, weight="bold", padx=8)
         self.slide_label.pack(side="left")
-        self._button(self.slide_bar, "›", lambda: self.turn(1), light=True).pack(side="left")
-        self._button(controls, self.t("fit"), self.set_fit, light=True).pack(side="right")
-        self._button(controls, "1:1", self.actual_size, light=True).pack(side="right", padx=5)
-        self._button(controls, "+", lambda: self.zoom(1.2), light=True).pack(side="right")
-        self.zoom_label = self._label(controls, "100 %", fg=DARK, size=9, width=7)
-        self.zoom_label.pack(side="right")
-        self._button(controls, "−", lambda: self.zoom(1 / 1.2), light=True).pack(side="right")
+        self._button(self.slide_bar, "›", lambda: self.turn(1), light=True, compact=True).pack(side="left")
+        self.zoom_bar = tk.Frame(controls, bg=PAPER)
+        self._button(self.zoom_bar, "−", lambda: self.zoom(1 / 1.2), light=True, compact=True).pack(side="left")
+        self.zoom_label = self._label(self.zoom_bar, "100 %", fg=DARK, size=9, width=5)
+        self.zoom_label.pack(side="left")
+        self._button(self.zoom_bar, "+", lambda: self.zoom(1.2), light=True, compact=True).pack(side="left")
+        self._button(self.zoom_bar, "1:1", self.actual_size, light=True, compact=True).pack(side="left", padx=4)
+        self._button(self.zoom_bar, self.t("fit"), self.set_fit, light=True, compact=True).pack(side="left")
         self.detail_label = self._label(main, self.t("idle_detail"), fg=FAINT, size=8, anchor="w")
-        self.detail_label.pack(fill="x", padx=25, pady=(2, 16))
+        # Bottom rows are laid out before the canvas, so a short window shrinks the figure, not them.
+        self.detail_label.pack(side="bottom", fill="x", padx=25, pady=(2, 16), before=self.canvas)
+        controls.pack(side="bottom", fill="x", padx=23, pady=(12, 7), before=self.canvas)
+        self.show_all_button = self._button(self.canvas, self.t("show_all"), lambda: self.set_period("all"), light=True)
 
     def _build_chat(self, body):
         self.chat = tk.Frame(body, bg=PANEL, width=380)
@@ -278,6 +283,7 @@ class Visor:
         self.copy_button = self._button(actions, self.t("copy_command"), self.copy_command)
         self.copy_button.pack(side="left", padx=6)
         bottom = self.chat_bottom = tk.Frame(self.chat, bg=PANEL)
+        self.working_label = self._label(bottom, self.t("working"), fg=ACCENT, size=8, anchor="w")
         self.point_bar = tk.Frame(bottom, bg=PANEL)
         self.point_label = self._label(self.point_bar, "", fg=ACCENT, size=8, anchor="w")
         self.point_label.pack(side="left")
@@ -313,12 +319,14 @@ class Visor:
 
     def apply_chat_layout(self):
         if self.chat_open:
-            self.root.minsize(CHAT_MIN_WINDOW, 540)
+            # Never ask for more than the screen has.
+            needed = min(CHAT_MIN_WINDOW, self.root.winfo_screenwidth())
+            self.root.minsize(needed, 540)
             self.root.update_idletasks()
             width, height = self.root.winfo_width(), self.root.winfo_height()
-            if width < CHAT_MIN_WINDOW:
-                self.root.geometry(f"{CHAT_MIN_WINDOW}x{max(540, height)}")
-            self.set_chat_width(self.chat_width(max(width, CHAT_MIN_WINDOW)))
+            if width < needed:
+                self.root.geometry(f"{needed}x{max(540, height)}")
+            self.set_chat_width(self.chat_width(max(width, needed)))
             self.chat.pack(side="right", fill="y", before=self.main)
         else:
             self.root.minsize(820, 540)
@@ -414,7 +422,7 @@ class Visor:
         self.paint_periods()
         self.refresh_history()
         # Keep the canvas consistent with the list: never show an image the filter hides.
-        if self.current and not any(entry(item) == entry(self.current) for item in self.items):
+        if not self.current or not any(entry(item) == entry(self.current) for item in self.items):
             if self.items:
                 self.select(self.items[0], rebuild=False)
             else:
@@ -428,7 +436,7 @@ class Visor:
 
     def refresh_history(self):
         self.items = self.store.history(self.session, 200, collapse=True, since=self.since()) if self.session else []
-        self.count_label.configure(text=str(len(self.items)))
+        self.update_position()
         for child in self.history_frame.winfo_children():
             child.destroy()
         self.thumbnails.clear()
@@ -476,6 +484,11 @@ class Visor:
         if self.session and not self.items:
             self._label(self.history_frame, self.t("nothing_history"), fg=MUTED, size=9).pack(anchor="w", padx=10, pady=6)
 
+    def update_position(self):
+        """'k / n' in the history header when the shown entry is in the list, else just n."""
+        index = next((i for i, value in enumerate(self.items) if self.current and entry(value) == entry(self.current)), None)
+        self.count_label.configure(text=str(len(self.items)) if index is None else f"{len(self.items) - index} / {len(self.items)}")
+
     def select(self, item, rebuild=True):
         if self.original:
             self.original.close()
@@ -511,9 +524,7 @@ class Visor:
             for key, card in self.cards.items():
                 color = SELECTED if key == entry(item) else CARD
                 self._recolor(card, color)
-        index = next((i for i, value in enumerate(self.items) if entry(value) == entry(item)), 0)
-        shown = any(entry(value) == entry(item) for value in self.items)
-        self.count_label.configure(text=f"{len(self.items) - index} / {len(self.items)}" if shown else str(len(self.items)))
+        self.update_position()
         if self.chat_entry != entry(item):
             self.load_chat()
         self.draw()
@@ -536,11 +547,18 @@ class Visor:
         canvas.delete("all")
         width, height = canvas.winfo_width(), canvas.winfo_height()
         if not self.original:
+            self.zoom_bar.pack_forget()
+            if self.session and self.period != "all":
+                # A filter hides everything: offer the way back instead of the first-launch welcome.
+                canvas.create_window(width / 2, height / 2, window=self.show_all_button)
+                return
             canvas.create_oval(width / 2 - 28, height / 2 - 70, width / 2 + 28, height / 2 - 14, fill="#d3e3d6", outline="")
             canvas.create_text(width / 2, height / 2 - 42, text="V", fill="#507d65", font=("DejaVu Sans", 24, "bold"))
             canvas.create_text(width / 2, height / 2 + 10, text=self.t("empty_canvas"), fill=DARK, font=("DejaVu Sans", 15, "bold"))
             canvas.create_text(width / 2, height / 2 + 46, text=self.t("empty_canvas_hint"), fill="#596c5d", font=("DejaVu Sans", 10))
             return
+        if not self.zoom_bar.winfo_manager():
+            self.zoom_bar.pack(side="right", padx=(16, 0))
         if self.fit:
             self.scale = min((max(width, 80) - 36) / self.original.width,
                              (max(height, 80) - 36) / self.original.height, 1.0)
@@ -759,6 +777,10 @@ class Visor:
         usable = bool(self.current and self.current.get("agent_session"))
         running = bool(self.thread and self.thread["id"] in self.runs)
         self.send_button.configure(text=self.t("stop") if running else self.t("send"), state="normal" if usable else "disabled")
+        if running and not self.working_label.winfo_manager():
+            self.working_label.pack(fill="x", pady=(0, 6), before=self.point_bar if self.point_bar.winfo_manager() else self.chat_input)
+        elif not running:
+            self.working_label.pack_forget()
         self.chat_input.configure(state="normal" if usable else "disabled")
         self.copy_button.configure(state="normal" if self.thread and self.thread["fork"] else "disabled")
 
@@ -840,9 +862,11 @@ class Visor:
             if not finished:
                 errors.seek(0)
                 detail = errors.read().decode("utf-8", "replace").strip()[-600:]
-                message = self.t("stopped") if process.returncode and process.returncode < 0 else (detail or self.t("exit_code", code=process.returncode))
-                self.store.add_message(thread, "error", message)
-                self.events.put(({"action": "chat", "thread": thread, "kind": "error", "text": message}, None, None))
+                stopped = bool(process.returncode and process.returncode < 0)
+                message = self.t("stopped") if stopped else (detail or self.t("exit_code", code=process.returncode))
+                kind = "note" if stopped else "error"  # stopping was the user's choice, not a failure
+                self.store.add_message(thread, kind, message)
+                self.events.put(({"action": "chat", "thread": thread, "kind": kind, "text": message}, None, None))
         finally:
             process.stdout.close()
             errors.close()
@@ -897,7 +921,7 @@ class Visor:
             if self.thread and self.thread["id"] == payload["thread"]:
                 if payload["kind"] == "session":
                     self.thread["fork"] = payload["text"]
-                elif payload["kind"] in ("text", "tool", "error"):
+                elif payload["kind"] in ("text", "tool", "error", "note"):
                     self.append_chat("assistant" if payload["kind"] == "text" else payload["kind"], payload["text"])
                 self.update_chat_buttons()
         if action == "notice":
