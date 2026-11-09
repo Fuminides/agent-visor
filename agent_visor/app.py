@@ -42,6 +42,27 @@ CHAT_MIN_WINDOW = 1080
 INLINE = re.compile(r"(\*\*[^*\n]+\*\*|`[^`\n]+`)")
 
 
+def visor_mark(size, fill, stroke, background=None, square=False):
+    """The Visor mark (a V in a circle, or in a rounded square for the app icon), drawn at 4x and reduced
+    so its curves stay smooth; Tk's own canvas shapes are not antialiased."""
+    scale = 4
+    side = size * scale
+    image = Image.new("RGBA", (side, side), background or (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    if square:  # same proportions as assets/visor.svg
+        draw.rounded_rectangle((0, 0, side - 1, side - 1), radius=side * 30 // 128, fill=BG)
+        inset = side * 17 // 128
+        draw.rounded_rectangle((inset, inset, side - 1 - inset, side - 1 - inset), radius=side * 28 // 128, fill=fill)
+        points, width = [(side * .3125, side * .367), (side * .5, side * .656), (side * .6875, side * .367)], side * .078
+    else:
+        draw.ellipse((side * .075, side * .075, side * .925, side * .925), fill=fill)
+        points, width = [(side * .275, side * .35), (side * .5, side * .7), (side * .725, side * .35)], side * .075
+    draw.line(points, fill=stroke, width=round(width), joint="curve")
+    for x, y in (points[0], points[-1]):  # round caps
+        draw.ellipse((x - width / 2, y - width / 2, x + width / 2, y + width / 2), fill=stroke)
+    return image.resize((size, size), Image.Resampling.BOX)  # area average: smooth edges without a halo
+
+
 def ring(parent, filled=False):
     """Focus-ring colour with at least 3:1 contrast against the background the control sits on."""
     red, green, blue = (value / 65535 for value in parent.winfo_rgb(parent.cget("bg")))
@@ -177,11 +198,9 @@ class Visor:
         header = tk.Frame(self.root, bg=BG, height=self.px(78))
         header.pack(fill="x")
         header.pack_propagate(False)
-        mark = tk.Canvas(header, width=self.px(40), height=self.px(40), bg=BG, highlightthickness=0)
-        mark.pack(side="left", padx=(24, 13))
-        mark.create_oval(3, 3, 37, 37, fill=ACCENT, outline="")
-        mark.create_line(11, 14, 20, 28, 29, 14, fill=BG, width=3 * self.factor, capstyle="round", joinstyle="round")
-        mark.scale("all", 0, 0, self.factor, self.factor)
+        self.header_mark = ImageTk.PhotoImage(visor_mark(self.px(40), ACCENT, BG, BG))
+        self.empty_mark = ImageTk.PhotoImage(visor_mark(self.px(56), "#d3e3d6", "#507d65", "#e6ebe3"))
+        tk.Label(header, image=self.header_mark, bg=BG, bd=0).pack(side="left", padx=(24, 13))
         brand = tk.Frame(header, bg=BG)
         brand.pack(side="left")
         self._label(brand, "Visor", size=19, weight="bold", anchor="w").pack(anchor="w")
@@ -369,12 +388,9 @@ class Visor:
         self.chat_status.configure(wraplength=width - self.px(40))
 
     def _icon(self):
-        icon = Image.new("RGBA", (64, 64), BG)
-        draw = ImageDraw.Draw(icon)
-        draw.rounded_rectangle((5, 5, 59, 59), radius=17, fill=ACCENT)
-        draw.line([(18, 23), (32, 44), (46, 23)], fill=BG, width=6, joint="curve")
-        self.window_icon = ImageTk.PhotoImage(icon)
-        self.root.iconphoto(True, self.window_icon)
+        # Several sizes, so the window manager scales down from a sharp one instead of up from 64 px.
+        self.window_icons = [ImageTk.PhotoImage(visor_mark(size, ACCENT, BG, square=True)) for size in (256, 128, 64, 48, 32, 16)]
+        self.root.iconphoto(True, *self.window_icons)
 
     def refresh_sessions(self):
         self.sessions = self.store.sessions()
@@ -570,8 +586,7 @@ class Visor:
                 canvas.create_window(width / 2, height / 2, window=self.show_all_button)
                 return
             p = self.px
-            canvas.create_oval(width / 2 - p(28), height / 2 - p(70), width / 2 + p(28), height / 2 - p(14), fill="#d3e3d6", outline="")
-            canvas.create_text(width / 2, height / 2 - p(42), text="V", fill="#507d65", font=("DejaVu Sans", 24, "bold"))
+            canvas.create_image(width / 2, height / 2 - p(42), image=self.empty_mark)
             canvas.create_text(width / 2, height / 2 + p(10), text=self.t("empty_canvas"), fill=DARK, font=("DejaVu Sans", 15, "bold"))
             canvas.create_text(width / 2, height / 2 + p(46), text=self.t("empty_canvas_hint"), fill="#596c5d", font=("DejaVu Sans", 10))
             return

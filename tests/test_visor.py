@@ -203,6 +203,19 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(default_session(), "custom")
 
 
+class IconTests(unittest.TestCase):
+    def test_mark_is_antialiased_without_a_halo(self):
+        from agent_visor.app import ACCENT, BG, visor_mark
+        mark = visor_mark(40, ACCENT, BG, BG).convert("RGB")
+        colours = {colour for _, colour in mark.getcolors(maxcolors=40 * 40)}
+        self.assertGreater(len(colours), 10)  # blended edge pixels, not just two flat colours
+        background = mark.getpixel((0, 0))
+        darkest = min(sum(pixel) for pixel in colours)
+        self.assertGreaterEqual(darkest, sum(background))  # nothing darker than the background: no ringing halo
+        icon = visor_mark(256, ACCENT, BG, square=True)
+        self.assertEqual(icon.getpixel((0, 0))[3], 0)  # transparent outside the rounded square
+
+
 class LanguageTests(unittest.TestCase):
     def test_both_languages_have_the_same_text_keys(self):
         from agent_visor import i18n
