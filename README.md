@@ -56,6 +56,12 @@ The first call opens the window. Later calls update it without raising it or tak
 - In the question panel: `Enter` sends and `Shift+Enter` adds a line. While you type, the window shortcuts are off; click the image to get them back.
 - **EN | ES** in the header switches the interface between English and Spanish.
 
+## Accessibility
+
+- Every control can be reached with `Tab` and shows a focus ring with at least 3:1 contrast; text meets 4.5:1.
+- Sizes follow the screen's scale (Tk scaling), so the layout keeps its proportions on HiDPI screens.
+- Visor is built with Tk, which has no screen-reader (AT-SPI) support on Linux, so screen readers cannot read the window.
+
 Visor reads PDF, PNG, JPEG, WebP, GIF (first frame), TIFF, BMP and ICO, up to 24 megapixels or 100 MB per file. Export SVG to PNG or PDF first. The window lists up to 200 recent entries per project; older ones stay saved and can be listed with `visor history --limit 1000`.
 
 ## Installation

@@ -699,6 +699,87 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
             finally:
                 root.destroy()
 
+    def test_every_control_has_a_visible_focus_ring(self):
+        """WCAG non-text contrast: the focus ring differs at least 3:1 from what surrounds it, on every control."""
+        import tkinter as tk
+        from agent_visor.app import Visor
+
+        def luminance(color, widget):
+            red, green, blue = (value / 65535 for value in widget.winfo_rgb(color))
+            linear = [c / 12.92 if c <= .03928 else ((c + .055) / 1.055) ** 2.4 for c in (red, green, blue)]
+            return .2126 * linear[0] + .7152 * linear[1] + .0722 * linear[2]
+
+        def ratio(first, second, widget):
+            high, low = sorted((luminance(first, widget), luminance(second, widget)), reverse=True)
+            return (high + .05) / (low + .05)
+
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            directory = Path(directory)
+            pdf = directory / "talk.pdf"
+            pages = [Image.new("RGB", (160, 90), "white") for _ in range(2)]
+            pages[0].save(pdf, save_all=True, append_images=pages[1:])
+            store = Store(directory / "data")
+            store.ingest([str(pdf)], "Ring", agent_session="31cde43d-3856-47e7-990f-9d87748f1e6d")
+            store.set_setting("chat_open", True)
+            root = tk.Tk()
+            try:
+                app = Visor(root, store)
+                app.point = (10, 10)
+                app.show_point()
+                app.show_all_button.place(x=0, y=0)  # normally only shown on an empty filter
+                root.update()
+                checked = 0
+                stack = [root]
+                while stack:
+                    widget = stack.pop()
+                    stack.extend(widget.winfo_children())
+                    if isinstance(widget, (tk.Button, tk.Checkbutton, tk.Text)) and str(widget.cget("takefocus")) != "0":
+                        name = widget.cget("text") if "text" in widget.keys() else widget.winfo_class()
+                        self.assertGreaterEqual(int(widget.cget("highlightthickness")), 1, name)
+                        around = widget.master.cget("bg")
+                        self.assertGreaterEqual(ratio(widget.cget("highlightcolor"), around, widget), 3, name)
+                        if not isinstance(widget, tk.Text):  # text fields keep a visible border on purpose
+                            self.assertEqual(widget.winfo_rgb(widget.cget("highlightbackground")), widget.winfo_rgb(around), name)
+                        checked += 1
+                self.assertGreater(checked, 20)
+            finally:
+                root.destroy()
+
+    def test_hidpi_scales_fixed_sizes(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            directory = Path(directory)
+            pdf = directory / "talk.pdf"
+            pages = [Image.new("RGB", (160, 90), "white") for _ in range(3)]
+            pages[0].save(pdf, save_all=True, append_images=pages[1:])
+            store = Store(directory / "data")
+            store.ingest([str(pdf)], "HiDPI")
+            root = tk.Tk()
+            original = root.tk.call("tk", "scaling")  # Tk keeps scaling per display, shared by later tests
+            try:
+                root.tk.call("tk", "scaling", 2 * 96 / 72)  # a 192 dpi screen
+                app = Visor(root, store)
+                root.geometry("1640x1000")
+                root.update()
+                self.assertEqual(app.factor, 2)
+                sidebar = app.count_label.master.master
+                self.assertEqual(sidebar.winfo_width(), 528)
+                # No label or button gets less room than it asks for (Tk shrinks a widget rather than overflow,
+                # so a clipped text shows up as width < reqwidth). The detail line truncates long paths on purpose.
+                clipped, stack = [], [root]
+                while stack:
+                    widget = stack.pop()
+                    stack.extend(widget.winfo_children())
+                    if (isinstance(widget, (tk.Label, tk.Button, tk.Checkbutton)) and widget.winfo_ismapped()
+                            and widget is not app.detail_label
+                            and (widget.winfo_width() < widget.winfo_reqwidth() or widget.winfo_height() < widget.winfo_reqheight())):
+                        clipped.append(widget.cget("text"))
+                self.assertEqual(clipped, [])
+            finally:
+                root.tk.call("tk", "scaling", original)
+                root.destroy()
+
 
 class InstallerTests(unittest.TestCase):
     def test_install_is_repeatable_and_does_not_replace_other_commands(self):

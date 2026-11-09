@@ -42,6 +42,14 @@ CHAT_MIN_WINDOW = 1080
 INLINE = re.compile(r"(\*\*[^*\n]+\*\*|`[^`\n]+`)")
 
 
+def ring(parent, filled=False):
+    """Focus-ring colour with at least 3:1 contrast against the background the control sits on."""
+    red, green, blue = (value / 65535 for value in parent.winfo_rgb(parent.cget("bg")))
+    if .2126 * red + .7152 * green + .0722 * blue > .5:
+        return DARK
+    return INK if filled else ACCENT
+
+
 def entry(item):
     """History entry an item belongs to: its deck, or the image itself."""
     return item.get("deck") or item["id"]
@@ -75,8 +83,10 @@ class Visor:
         self.runs = {}
         self.language = store.setting("language", "en")
         root.title(self.t("window_title"))
-        root.geometry(store.setting("geometry", "1120x760"))
-        root.minsize(820, 540)
+        # Fixed sizes below are pixels at 96 dpi; they scale with the screen so HiDPI layouts keep their proportions.
+        self.factor = max(1.0, round(float(root.tk.call("tk", "scaling")) / (96 / 72) * 4) / 4)
+        root.geometry(store.setting("geometry", f"{self.px(1120)}x{self.px(760)}"))
+        root.minsize(self.px(820), self.px(540))
         root.configure(bg=BG)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
@@ -106,6 +116,9 @@ class Visor:
         root.bind("<Control-minus>", lambda event: self.zoom(1 / 1.2))
         root.after(50, self.poll_events)
         root.after(900, self.watch)
+
+    def px(self, value):
+        return round(value * self.factor)
 
     def t(self, key, **values):
         return i18n.text(self.language, key, **values)
@@ -140,14 +153,16 @@ class Visor:
         return tk.Label(parent, text=text, fg=fg, bg=bg or parent.cget("bg"),
                         font=("DejaVu Sans", size, weight), **kwargs)
 
-    def _button(self, parent, text, command, primary=False, light=False, compact=False):
+    def _button(self, parent, text, command, primary=False, light=False, compact=False, quiet=False):
         bg = ACCENT if primary else ("#e1e7df" if light else CARD)
         fg = DARK if primary or light else INK
+        if quiet:  # secondary action: text only, on the parent's background
+            bg, fg = parent.cget("bg"), MUTED
         # A 2 px ring in the parent's colour, which turns visible when the button has keyboard focus.
         return tk.Button(parent, text=text, command=command, bg=bg, fg=fg,
                          activebackground="#a6e6d0" if primary else ("#d4ded3" if light else SELECTED),
                          activeforeground=fg, relief="flat", bd=0, highlightthickness=2,
-                         highlightbackground=parent.cget("bg"), highlightcolor=DARK if light else (INK if primary else ACCENT),
+                         highlightbackground=parent.cget("bg"), highlightcolor=ring(parent, primary),
                          cursor="hand2", font=("DejaVu Sans", 10), padx=8 if compact else 13, pady=7)
 
     def _chip(self, parent, text, command, chosen=False, bold=False):
@@ -156,16 +171,17 @@ class Visor:
                          font=("DejaVu Sans", 8, "bold" if bold else "normal"), padx=8, pady=3,
                          bg=ACCENT if chosen else CARD, fg=DARK if chosen else INK,
                          activebackground="#a6e6d0" if chosen else SELECTED, activeforeground=DARK if chosen else INK,
-                         highlightthickness=2, highlightbackground=parent.cget("bg"), highlightcolor=INK if chosen else ACCENT)
+                         highlightthickness=2, highlightbackground=parent.cget("bg"), highlightcolor=ring(parent, chosen))
 
     def _build(self):
-        header = tk.Frame(self.root, bg=BG, height=78)
+        header = tk.Frame(self.root, bg=BG, height=self.px(78))
         header.pack(fill="x")
         header.pack_propagate(False)
-        mark = tk.Canvas(header, width=40, height=40, bg=BG, highlightthickness=0)
+        mark = tk.Canvas(header, width=self.px(40), height=self.px(40), bg=BG, highlightthickness=0)
         mark.pack(side="left", padx=(24, 13))
         mark.create_oval(3, 3, 37, 37, fill=ACCENT, outline="")
-        mark.create_line(11, 14, 20, 28, 29, 14, fill=BG, width=3, capstyle="round", joinstyle="round")
+        mark.create_line(11, 14, 20, 28, 29, 14, fill=BG, width=3 * self.factor, capstyle="round", joinstyle="round")
+        mark.scale("all", 0, 0, self.factor, self.factor)
         brand = tk.Frame(header, bg=BG)
         brand.pack(side="left")
         self._label(brand, "Visor", size=19, weight="bold", anchor="w").pack(anchor="w")
@@ -178,11 +194,12 @@ class Visor:
             self._chip(actions, code.upper(), lambda value=code: self.set_language(value), chosen, bold=chosen).pack(side="left")
         self.ask_button = self._button(actions, self.t("ask"), self.toggle_chat)
         self.ask_button.pack(side="left", padx=(16, 0))
-        self._button(actions, self.t("open_image"), self.open_files).pack(side="left", padx=(8, 0))
+        # Agents send nearly everything; opening by hand is the secondary action, so it is quieter than Ask.
+        self._button(actions, self.t("open_image"), self.open_files, quiet=True).pack(side="left", padx=(8, 0))
         tk.Frame(self.root, height=1, bg="#2a3b40").pack(fill="x")
         body = tk.Frame(self.root, bg=PANEL)
         body.pack(fill="both", expand=True)
-        sidebar = tk.Frame(body, bg=PANEL, width=264)
+        sidebar = tk.Frame(body, bg=PANEL, width=self.px(264))
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
         self._label(sidebar, self.t("project"), fg=MUTED, size=8, weight="bold").pack(anchor="w", padx=20, pady=(22, 10))
@@ -221,7 +238,7 @@ class Visor:
         self.paint_periods()
         hist_area = tk.Frame(sidebar, bg=PANEL)
         hist_area.pack(fill="both", expand=True, padx=(10, 0))
-        self.history_canvas = tk.Canvas(hist_area, bg=PANEL, highlightthickness=0, bd=0, width=244)
+        self.history_canvas = tk.Canvas(hist_area, bg=PANEL, highlightthickness=0, bd=0, width=self.px(244))
         self.history_canvas.pack(side="left", fill="both", expand=True)
         scroll = ttk.Scrollbar(hist_area, orient="vertical", command=self.history_canvas.yview, style="Visor.Vertical.TScrollbar")
         scroll.pack(side="right", fill="y")
@@ -237,9 +254,9 @@ class Visor:
         heading = tk.Frame(main, bg=PAPER)
         heading.pack(fill="x", padx=28, pady=(25, 15))
         self.title_label = self._label(heading, self.t("welcome_title"), fg=DARK, size=19, weight="bold", anchor="w",
-                                       justify="left", wraplength=650)
+                                       justify="left", wraplength=self.px(650))
         self.title_label.pack(fill="x")
-        self.caption_label = self._label(heading, self.t("welcome_caption"), fg=SOFT, size=10, anchor="w", justify="left", wraplength=650)
+        self.caption_label = self._label(heading, self.t("welcome_caption"), fg=SOFT, size=10, anchor="w", justify="left", wraplength=self.px(650))
         self.caption_label.pack(fill="x", pady=(7, 0))
         self.new_button = self._button(main, self.t("new_images"), self.show_latest, primary=True)
         self.canvas = tk.Canvas(main, bg="#e6ebe3", highlightthickness=0, cursor="fleur")
@@ -273,10 +290,10 @@ class Visor:
         self.show_all_button = self._button(self.canvas, self.t("show_all"), lambda: self.set_period("all"), light=True)
 
     def _build_chat(self, body):
-        self.chat = tk.Frame(body, bg=PANEL, width=380)
+        self.chat = tk.Frame(body, bg=PANEL, width=self.px(380))
         self.chat.pack_propagate(False)
         self._label(self.chat, self.t("chat_title"), fg=MUTED, size=8, weight="bold").pack(anchor="w", padx=18, pady=(22, 6))
-        self.chat_status = self._label(self.chat, "", fg=MUTED, size=8, anchor="w", justify="left", wraplength=340)
+        self.chat_status = self._label(self.chat, "", fg=MUTED, size=8, anchor="w", justify="left", wraplength=self.px(340))
         self.chat_status.pack(fill="x", padx=18)
         actions = self.chat_actions = tk.Frame(self.chat, bg=PANEL)
         self._button(actions, self.t("new_thread"), self.new_thread).pack(side="left")
@@ -301,6 +318,7 @@ class Visor:
         self.chat_log = tk.Text(self.chat, wrap="word", bg=CARD, fg=INK, relief="flat", font=("DejaVu Sans", 10),
                                 padx=10, pady=10, state="disabled", highlightthickness=0, cursor="arrow", takefocus=0)
         self.chat_log.tag_configure("user", foreground=ACCENT, font=("DejaVu Sans", 10, "bold"), spacing1=8)
+        self.chat_log.tag_configure("user_text", foreground=INK, spacing1=8)
         self.chat_log.tag_configure("assistant", spacing1=4)
         self.chat_log.tag_configure("tool", foreground=MUTED, font=("DejaVu Sans", 8))
         self.chat_log.tag_configure("error", foreground=ERROR)
@@ -320,25 +338,24 @@ class Visor:
     def apply_chat_layout(self):
         if self.chat_open:
             # Never ask for more than the screen has.
-            needed = min(CHAT_MIN_WINDOW, self.root.winfo_screenwidth())
-            self.root.minsize(needed, 540)
+            needed = min(self.px(CHAT_MIN_WINDOW), self.root.winfo_screenwidth())
+            self.root.minsize(needed, self.px(540))
             self.root.update_idletasks()
             width, height = self.root.winfo_width(), self.root.winfo_height()
             if width < needed:
-                self.root.geometry(f"{needed}x{max(540, height)}")
+                self.root.geometry(f"{needed}x{max(self.px(540), height)}")
             self.set_chat_width(self.chat_width(max(width, needed)))
             self.chat.pack(side="right", fill="y", before=self.main)
         else:
-            self.root.minsize(820, 540)
+            self.root.minsize(self.px(820), self.px(540))
             self.chat.pack_forget()
         chosen = self.chat_open
         self.ask_button.configure(bg=ACCENT if chosen else CARD, fg=DARK if chosen else INK,
                                   activebackground="#a6e6d0" if chosen else SELECTED, activeforeground=DARK if chosen else INK,
-                                  highlightcolor=INK if chosen else ACCENT)
+                                  highlightcolor=ring(self.ask_button.master, chosen))
 
-    @staticmethod
-    def chat_width(window_width):
-        return max(300, min(380, int(window_width * .3)))
+    def chat_width(self, window_width):
+        return max(self.px(300), min(self.px(380), int(window_width * .3)))
 
     def resize_chat(self, event):
         if event.widget is self.root and self.chat_open:
@@ -349,7 +366,7 @@ class Visor:
     def set_chat_width(self, width):
         # The status text wraps inside the panel, whatever width the panel has.
         self.chat.configure(width=width)
-        self.chat_status.configure(wraplength=width - 40)
+        self.chat_status.configure(wraplength=width - self.px(40))
 
     def _icon(self):
         icon = Image.new("RGBA", (64, 64), BG)
@@ -453,16 +470,16 @@ class Visor:
             thumbpath = Path(item["snapshot"]).with_suffix(".thumb.png")
             try:
                 with Image.open(thumbpath if thumbpath.exists() else item["snapshot"]) as thumb:
-                    thumb.thumbnail((62, 45))
+                    thumb.thumbnail((self.px(62), self.px(45)))
                     photo = ImageTk.PhotoImage(thumb.copy())
                 self.thumbnails.append(photo)
-                label = tk.Label(top, image=photo, bg=bg, width=66, height=48)
+                label = tk.Label(top, image=photo, bg=bg, width=self.px(66), height=self.px(48))
                 label.pack(side="left", padx=(0, 8))
             except (OSError, ValueError):
                 self._label(top, "◇", fg=ACCENT, bg=bg, size=22).pack(side="left", padx=10)
             text = tk.Frame(top, bg=bg)
             text.pack(side="left", fill="x", expand=True)
-            self._label(text, item["title"], bg=bg, size=9, weight="bold", anchor="w", wraplength=116, justify="left").pack(anchor="w")
+            self._label(text, item["title"], bg=bg, size=9, weight="bold", anchor="w", wraplength=self.px(116), justify="left").pack(anchor="w")
             stamp = datetime.fromtimestamp(item["created"]).strftime("%d %b · %H:%M:%S")
             self._label(text, stamp, fg=MUTED, bg=bg, size=8).pack(anchor="w", pady=(4, 0))
             parts = [self.t("latest")] if index == 0 else []
@@ -538,8 +555,8 @@ class Visor:
         if self.pending_draw:
             self.root.after_cancel(self.pending_draw)
         self.pending_draw = self.root.after(45, self.draw)
-        self.caption_label.configure(wraplength=max(300, self.canvas.winfo_width() - 20))
-        self.title_label.configure(wraplength=max(240, self.canvas.winfo_width() - 20))
+        self.caption_label.configure(wraplength=max(self.px(300), self.canvas.winfo_width() - self.px(20)))
+        self.title_label.configure(wraplength=max(self.px(240), self.canvas.winfo_width() - self.px(20)))
 
     def draw(self):
         self.pending_draw = None
@@ -552,10 +569,11 @@ class Visor:
                 # A filter hides everything: offer the way back instead of the first-launch welcome.
                 canvas.create_window(width / 2, height / 2, window=self.show_all_button)
                 return
-            canvas.create_oval(width / 2 - 28, height / 2 - 70, width / 2 + 28, height / 2 - 14, fill="#d3e3d6", outline="")
-            canvas.create_text(width / 2, height / 2 - 42, text="V", fill="#507d65", font=("DejaVu Sans", 24, "bold"))
-            canvas.create_text(width / 2, height / 2 + 10, text=self.t("empty_canvas"), fill=DARK, font=("DejaVu Sans", 15, "bold"))
-            canvas.create_text(width / 2, height / 2 + 46, text=self.t("empty_canvas_hint"), fill="#596c5d", font=("DejaVu Sans", 10))
+            p = self.px
+            canvas.create_oval(width / 2 - p(28), height / 2 - p(70), width / 2 + p(28), height / 2 - p(14), fill="#d3e3d6", outline="")
+            canvas.create_text(width / 2, height / 2 - p(42), text="V", fill="#507d65", font=("DejaVu Sans", 24, "bold"))
+            canvas.create_text(width / 2, height / 2 + p(10), text=self.t("empty_canvas"), fill=DARK, font=("DejaVu Sans", 15, "bold"))
+            canvas.create_text(width / 2, height / 2 + p(46), text=self.t("empty_canvas_hint"), fill="#596c5d", font=("DejaVu Sans", 10))
             return
         if not self.zoom_bar.winfo_manager():
             self.zoom_bar.pack(side="right", padx=(16, 0))
@@ -583,8 +601,9 @@ class Visor:
             canvas.create_image(left + box[0] * self.scale, top + box[1] * self.scale, image=self.photo, anchor="nw")
         if self.point:
             x, y = left + self.point[0] * self.scale, top + self.point[1] * self.scale
-            canvas.create_oval(x - 11, y - 11, x + 11, y + 11, outline="white", width=6, tags="marker")
-            canvas.create_oval(x - 11, y - 11, x + 11, y + 11, outline="#e5484d", width=3, tags="marker")
+            r = self.px(11)
+            canvas.create_oval(x - r, y - r, x + r, y + r, outline="white", width=self.px(6), tags="marker")
+            canvas.create_oval(x - r, y - r, x + r, y + r, outline="#e5484d", width=self.px(3), tags="marker")
         self.zoom_label.configure(text=f"{round(self.scale * 100)} %")
 
     def set_fit(self):
@@ -761,15 +780,16 @@ class Visor:
         prefix = {"user": self.t("you"), "tool": "·  ", "error": "⚠  "}.get(role, "")
         self.chat_log.configure(state="normal")
         self.chat_log.insert("end", prefix, role)
+        body = "user_text" if role == "user" else role
         # Answers come as light Markdown: render **bold** and `code`, leave the rest as written.
         for part in INLINE.split(text) if role == "assistant" else [text]:
             if part.startswith("**") and part.endswith("**") and len(part) > 4:
-                self.chat_log.insert("end", part[2:-2], (role, "bold"))
+                self.chat_log.insert("end", part[2:-2], (body, "bold"))
             elif part.startswith("`") and part.endswith("`") and len(part) > 2:
-                self.chat_log.insert("end", part[1:-1], (role, "code"))
+                self.chat_log.insert("end", part[1:-1], (body, "code"))
             else:
-                self.chat_log.insert("end", part, role)
-        self.chat_log.insert("end", "\n\n", role)
+                self.chat_log.insert("end", part, body)
+        self.chat_log.insert("end", "\n\n", body)
         self.chat_log.configure(state="disabled")
         self.chat_log.see("end")
 
