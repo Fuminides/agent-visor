@@ -6,8 +6,14 @@ build-backend = "setuptools.build_meta"
 name = "agent-visor"
 version = "0.1.0"
 description = "A local visual companion for terminal coding agents"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Javier Fumanal Idocin" }]
 requires-python = ">=3.10"
 dependencies = ["Pillow>=10"]
+
+[project.urls]
+Repository = "https://github.com/Fuminides/agent-visor"
 
 [project.scripts]
 visor = "agent_visor.cli:main"

@@ -175,8 +175,8 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(len(self.store.history("study")), 2)
         self.assertIsNone(self.store.thread(new["id"]))
         first = self.store.new_thread(new["id"])
-        self.store.add_message(first["id"], "user", "¿Por qué?")
-        self.store.add_message(first["id"], "assistant", "Porque sí.")
+        self.store.add_message(first["id"], "user", "Why?")
+        self.store.add_message(first["id"], "assistant", "Because.")
         self.store.set_fork(first["id"], "fork-1")
         self.assertEqual(self.store.thread(new["id"])["fork"], "fork-1")
         self.assertEqual([m["role"] for m in self.store.messages(first["id"])], ["user", "assistant"])
@@ -190,6 +190,14 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(default_session(), "/a/project")
         with patch.dict(os.environ, {"VISOR_SESSION": "custom"}):
             self.assertEqual(default_session(), "custom")
+
+
+class LanguageTests(unittest.TestCase):
+    def test_both_languages_have_the_same_text_keys(self):
+        from agent_visor import i18n
+        self.assertEqual(set(i18n.TEXT["en"]), set(i18n.TEXT["es"]))
+        self.assertEqual(i18n.text("es", "slide", page=2, pages=5), "Diapositiva 2 / 5")
+        self.assertEqual(i18n.text("xx", "send"), "Send")
 
 
 class ChatTests(unittest.TestCase):
@@ -224,11 +232,11 @@ class ChatTests(unittest.TestCase):
                 factor = 768 / 220
             self.assertTrue(red_near(zoom, round(100 * factor), round(50 * factor), 26))
             item = dict(title="t", source="/s.png", snapshot=str(snapshot), width=400, height=300)
-            text = chat.prompt("¿Qué es esto?", item, True, dict(x=100, y=50, marked=marked, zoom=zoom))
+            text = chat.prompt("What is this?", item, True, dict(x=100, y=50, marked=marked, zoom=zoom))
             self.assertIn("x=100, y=50", text)
             self.assertIn(marked, text)
             self.assertIn(zoom, text)
-            self.assertTrue(text.endswith("¿Qué es esto?"))
+            self.assertTrue(text.endswith("What is this?"))
         with patch("agent_visor.chat.claude_binary", return_value="claude"):
             args = chat.command("orig", None, "pregunta", ["/data/images", "/data/points"])
         self.assertEqual(args[-1], "pregunta")
@@ -304,7 +312,7 @@ class DesktopIntegrationTests(unittest.TestCase):
 
     def test_cli_full_lifecycle_watch_versions_restart_and_unicode(self):
         self.assertFalse(self.cli("status", "--json")["running"])
-        first = self.cli("show", self.source, "--title", "Primera versión ñ", "--session", "Study", "--json")
+        first = self.cli("show", self.source, "--title", "First version ñ", "--session", "Study", "--json")
         initial_pid = first["pid"]
         store = Store(self.directory / "data")
         first_snapshot = store.get(first["item_ids"][0])["snapshot"]
@@ -405,11 +413,23 @@ class WindowBehaviorTests(unittest.TestCase):
                 self.assertEqual(app.current["id"], deck[0]["id"])
                 self.assertEqual(len(app.items), 2)
                 self.assertTrue(app.slide_bar.winfo_ismapped())
-                self.assertEqual(app.slide_label.cget("text"), "Diapositiva 1 / 3")
+                self.assertEqual(app.slide_label.cget("text"), "Slide 1 / 3")
                 self.assertTrue(app.turn(1))
                 self.assertTrue(app.turn(1))
                 self.assertTrue(app.turn(1))
                 self.assertEqual(app.current["page"], 3)
+                app.toggle_chat()
+                app.set_language("es")
+                root.update()
+                self.assertEqual(app.current["page"], 3)
+                self.assertEqual(app.slide_label.cget("text"), "Diapositiva 3 / 3")
+                self.assertEqual(app.period_buttons["all"].cget("text"), "Todo")
+                self.assertEqual(app.chat.winfo_manager(), "pack")  # mapping after a rebuild is timing-dependent
+                self.assertEqual(Store(Path(directory) / "data").setting("language"), "es")
+                app.set_language("en")
+                app.toggle_chat()
+                root.update()
+                self.assertEqual(app.slide_label.cget("text"), "Slide 3 / 3")
                 regenerated = store.ingest([str(pdf)], "Talk")
                 app.dispatch({"action": "received", "items": regenerated, "watched_id": deck[0]["deck"]})
                 self.assertEqual(app.current["id"], regenerated[2]["id"])
@@ -437,7 +457,7 @@ import json, sys
 open({str(calls)!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")
 for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
               {{"type": "assistant", "message": {{"content": [{{"type": "tool_use", "name": "Read", "input": {{"file_path": "/a.py"}}}}]}}}},
-              {{"type": "assistant", "message": {{"content": [{{"type": "text", "text": "Es por el ruido."}}]}}}},
+              {{"type": "assistant", "message": {{"content": [{{"type": "text", "text": "It is the noise."}}]}}}},
               {{"type": "result", "subtype": "success", "is_error": False}}]:
     print(json.dumps(event), flush=True)
 """)
@@ -458,7 +478,7 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                     app.toggle_chat()
                     root.update()
                     self.assertTrue(app.chat.winfo_ismapped())
-                    for question in ("¿Por qué baja?", "¿Y luego?"):
+                    for question in ("Why does it drop?", "And then?"):
                         app.chat_input.insert("1.0", question)
                         app.send_or_stop()
                         deadline = time.monotonic() + 10
@@ -469,9 +489,9 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                     self.assertEqual(app.thread["fork"], "fork-123")
                     self.assertEqual([m["role"] for m in store.messages(app.thread["id"])],
                                      ["user", "tool", "assistant", "user", "tool", "assistant"])
-                    self.assertIn("Es por el ruido.", app.chat_log.get("1.0", "end"))
-                    app.append_chat("assistant", "La **clave** es `x`.")
-                    self.assertIn("La clave es x.", app.chat_log.get("1.0", "end"))
+                    self.assertIn("It is the noise.", app.chat_log.get("1.0", "end"))
+                    app.append_chat("assistant", "The **key** is `x`.")
+                    self.assertIn("The key is x.", app.chat_log.get("1.0", "end"))
                     self.assertEqual(str(app.copy_button.cget("state")), "normal")
                     width, height = app.canvas.winfo_width(), app.canvas.winfo_height()
                     app.canvas.event_generate("<Button-3>", x=width // 2, y=height // 2)
@@ -479,7 +499,7 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                     self.assertTrue(abs(app.point[0] - 150) <= 2 and abs(app.point[1] - 100) <= 2, app.point)
                     self.assertTrue(app.canvas.find_withtag("marker"))
                     self.assertTrue(app.point_bar.winfo_ismapped())
-                    app.chat_input.insert("1.0", "¿Qué es esto?")
+                    app.chat_input.insert("1.0", "What is this?")
                     app.send_or_stop()
                     self.assertIsNone(app.point)
                     deadline = time.monotonic() + 10

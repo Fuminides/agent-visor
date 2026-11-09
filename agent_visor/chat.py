@@ -23,7 +23,7 @@ def claude_binary():
     fallback = Path.home() / ".local/bin/claude"
     if fallback.exists():
         return str(fallback)
-    raise RuntimeError("No se encuentra el comando claude.")
+    raise RuntimeError("The claude command was not found.")
 
 
 def projects_dir() -> Path:
@@ -98,21 +98,21 @@ def mark_point(snapshot, x, y, directory):
 
 
 def prompt(question, item, first, point=None):
-    where = f"«{item['title']}» ({item['source']}; copia guardada en {item['snapshot']})"
+    where = f"\"{item['title']}\" ({item['source']}; saved copy at {item['snapshot']})"
     if item.get("deck"):
-        where += f", diapositiva {item['page']} de {item['pages']}"
+        where += f", slide {item['page']} of {item['pages']}"
     if point:
-        question = (f"[El usuario ha señalado un punto de la figura: x={point['x']}, y={point['y']} px de "
-                    f"{item['width']}×{item['height']}, origen arriba a la izquierda ({100 * point['x'] / item['width']:.0f} % "
-                    f"del ancho, {100 * point['y'] / item['height']:.0f} % del alto). Pregunta por el elemento que hay en ese "
-                    f"punto o cerca. Mira con Read la figura con el punto rodeado en rojo ({point['marked']}) y la ampliación "
-                    f"alrededor del punto ({point['zoom']}).]\n\n{question}")
+        question = (f"[The user pointed at the figure: x={point['x']}, y={point['y']} px of "
+                    f"{item['width']}×{item['height']}, origin at the top left ({100 * point['x'] / item['width']:.0f} % "
+                    f"of the width, {100 * point['y'] / item['height']:.0f} % of the height). They are asking about the "
+                    f"element at or near that point. Use Read to look at the figure with the point circled in red "
+                    f"({point['marked']}) and at the zoom around the point ({point['zoom']}).]\n\n{question}")
     if not first:
-        return f"[Desde Visor · el usuario mira {where}]\n\n{question}"
-    return ("[Mensaje enviado desde Visor] Esta conversación es una bifurcación de tu sesión, abierta desde la ventana "
-            f"de Visor. El usuario está viendo la figura {where}, que mostraste con `visor show`. En esta bifurcación "
-            "solo puedes leer y buscar (Read, Grep, Glob): no puedes editar archivos ni ejecutar comandos. Responde "
-            "en el idioma del usuario, de forma breve y con poco Markdown, porque la ventana muestra texto plano.\n\n"
+        return f"[From Visor · the user is looking at {where}]\n\n{question}"
+    return ("[Message sent from Visor] This conversation is a fork of your session, opened from the Visor window. "
+            f"The user is looking at the figure {where}, which you showed with `visor show`. In this fork you can only "
+            "read and search (Read, Grep, Glob): you cannot edit files or run commands. Answer in the user's language, "
+            "briefly and with little Markdown, because the window shows plain text.\n\n"
             f"{question}")
 
 
@@ -137,6 +137,6 @@ def events(line):
         return found
     if kind == "result":
         if data.get("is_error") or data.get("subtype") != "success":
-            return [("error", str(data.get("result") or data.get("subtype") or "La sesión terminó con un error.")), ("done", "")]
+            return [("error", str(data.get("result") or data.get("subtype") or "The session ended with an error.")), ("done", "")]
         return [("done", "")]
     return []

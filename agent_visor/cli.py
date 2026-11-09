@@ -17,28 +17,28 @@ def default_session():
 
 
 def parser():
-    top = argparse.ArgumentParser(prog="visor", description="Tu ventana de imágenes para agentes de terminal. Se abre sola cuando hace falta.")
+    top = argparse.ArgumentParser(prog="visor", description="An image window for terminal coding agents. It opens by itself when needed.")
     top.add_argument("--version", action="version", version=f"visor {__version__}")
     commands = top.add_subparsers(dest="command", required=True)
-    show = commands.add_parser("show", help="Muestra imágenes o PDF; abre o reutiliza la ventana automáticamente")
+    show = commands.add_parser("show", help="Show images or PDFs; opens or reuses the window automatically")
     show.add_argument("paths", nargs="+", type=Path)
-    show.add_argument("--title", default="", help="Título de las imágenes")
-    show.add_argument("--caption", default="", help="Descripción o conclusión breve")
-    show.add_argument("--session", default=None, help="Proyecto o conversación (por defecto: carpeta actual)")
-    show.add_argument("--deck", action="store_true", help="Agrupa todas las imágenes de la llamada en una presentación")
-    show.add_argument("--focus", action="store_true", help="Trae la ventana al frente expresamente")
+    show.add_argument("--title", default="", help="Title of the images")
+    show.add_argument("--caption", default="", help="Short description or takeaway")
+    show.add_argument("--session", default=None, help="Project or conversation (default: current folder)")
+    show.add_argument("--deck", action="store_true", help="Join every image of the call into one presentation")
+    show.add_argument("--focus", action="store_true", help="Bring the window to the front")
     show.add_argument("--json", action="store_true")
-    op = commands.add_parser("open", help="Abre el visor y restaura el historial")
+    op = commands.add_parser("open", help="Open Visor and restore the history")
     op.add_argument("--session")
     op.add_argument("--json", action="store_true")
-    for name, helptext in [("status", "Comprueba el estado sin abrir la ventana"), ("stop", "Cierra el visor conservando el historial")]:
+    for name, helptext in [("status", "Check the state without opening the window"), ("stop", "Close Visor, keeping the history")]:
         sub = commands.add_parser(name, help=helptext)
         sub.add_argument("--json", action="store_true")
-    history = commands.add_parser("history", help="Consulta el historial sin abrir la ventana")
+    history = commands.add_parser("history", help="List the history without opening the window")
     history.add_argument("--session")
     history.add_argument("--limit", type=int, default=20)
     history.add_argument("--json", action="store_true")
-    demo = commands.add_parser("demo", help="Abre dos gráficos de ejemplo")
+    demo = commands.add_parser("demo", help="Show two example plots")
     demo.add_argument("--json", action="store_true")
     return top
 
@@ -57,11 +57,11 @@ def main(argv=None):
     try:
         if args.command == "status":
             state = running() or {"ok": True, "running": False}
-            emit(state, args.json, "Visor abierto." if state.get("running") else "Visor cerrado. Se abrirá al mostrar una imagen.")
+            emit(state, args.json, "Visor is open." if state.get("running") else "Visor is closed. It opens when an image is shown.")
             return 0
         if args.command == "stop":
             state = request({"action": "stop"}) if running() else {"ok": True, "running": False}
-            emit(state, args.json, "Visor cerrado. Historial conservado.")
+            emit(state, args.json, "Visor closed. History kept.")
             return 0
         if args.command == "history":
             if args.limit < 1 or args.limit > 1000:
@@ -69,26 +69,26 @@ def main(argv=None):
             directory = data_dir()
             items = Store().history(args.session, args.limit) if (directory / "history.sqlite3").exists() else []
             emit({"ok": True, "items": items}, args.json,
-                 "\n".join(f"{item['session']} · {item['title']} · {item['source']}" for item in items) or "Aún no hay imágenes.")
+                 "\n".join(f"{item['session']} · {item['title']} · {item['source']}" for item in items) or "No images yet.")
             return 0
         if args.command == "demo":
             from .demo import make_demo
             paths = make_demo()
             ensure_running()
-            result = request({"action": "show", "paths": list(map(str, paths)), "session": "Demo · Visor", "caption": "Un ejemplo de lo que puede mostrarte tu agente."})
+            result = request({"action": "show", "paths": list(map(str, paths)), "session": "Demo · Visor", "caption": "An example of what your agent can show you."})
         elif args.command == "open":
             ensure_running()
             result = request({"action": "open", "session": args.session, "focus": True})
         else:
             paths = [path.expanduser().resolve(strict=True) for path in args.paths]
             if len(paths) > 30:
-                raise ValueError("Envía como máximo 30 imágenes por llamada.")
+                raise ValueError("Send at most 30 images per call.")
             # Invalid inputs must not spawn an empty window or add partial history.
             if sum(page_count(path) for path in paths) > MAX_PAGES:
-                raise ValueError(f"Envía como máximo {MAX_PAGES} imágenes o páginas por llamada.")
+                raise ValueError(f"Send at most {MAX_PAGES} images or pages per call.")
             session = args.session or default_session()
             if not session.strip() or len(session) > 200:
-                raise ValueError("El proyecto debe tener entre 1 y 200 caracteres. Usa --session.")
+                raise ValueError("The project name must have 1 to 200 characters. Use --session.")
             ensure_running()
             # Rendering a long PDF can take a while; the window answers once every page is stored.
             # Inside Claude Code this names the session that is showing the image, so the chat panel can fork it.
@@ -97,8 +97,8 @@ def main(argv=None):
             result = request({"action": "show", "paths": list(map(str, paths)), "session": session,
                 "title": args.title, "caption": args.caption, "deck": args.deck, "focus": args.focus,
                 "agent_session": agent, "agent_cwd": str(Path.cwd()) if agent else None}, timeout=300)
-        verb = "Añadido al historial" if result.get("queued") else "Mostrado en Visor"
-        emit(result, args.json, f"{verb} · {result.get('session') or 'listo'}")
+        verb = "Added to history" if result.get("queued") else "Shown in Visor"
+        emit(result, args.json, f"{verb} · {result.get('session') or 'ready'}")
         return 0
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"visor: {exc}", file=sys.stderr)

@@ -29,14 +29,14 @@ def runtime_dir():
 def socket_path():
     path = str(runtime_dir() / "visor.sock")
     if len(os.fsencode(path)) > 103:
-        raise RuntimeError("La ruta de VISOR_RUNTIME_DIR es demasiado larga para un socket Unix.")
+        raise RuntimeError("VISOR_RUNTIME_DIR is too long for a Unix socket path.")
     return path
 
 
 def request(payload, timeout=20):
     packet = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
     if len(packet) > MAX_REQUEST:
-        raise ValueError("La petición es demasiado grande.")
+        raise ValueError("The request is too large.")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(timeout)
         client.connect(socket_path())
@@ -44,10 +44,10 @@ def request(payload, timeout=20):
         stream = client.makefile("rb")
         line = stream.readline(2 * 1024 * 1024)
         if not line:
-            raise ConnectionError("El visor ha cerrado la conexión.")
+            raise ConnectionError("Visor closed the connection.")
         result = json.loads(line)
         if not result.get("ok"):
-            raise RuntimeError(result.get("error", "Error del visor"))
+            raise RuntimeError(result.get("error", "Visor error"))
         return result
 
 
@@ -65,7 +65,7 @@ def ensure_running():
     directory = runtime_dir()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if directory.stat().st_uid != os.getuid():
-        raise RuntimeError("El directorio del socket pertenece a otro usuario.")
+        raise RuntimeError("The socket directory belongs to another user.")
     directory.chmod(0o700)
     with (directory / "startup.lock").open("a") as lock:
         # A bounded lock wait also handles several agents starting simultaneously.
@@ -76,13 +76,13 @@ def ensure_running():
                 break
             except BlockingIOError:
                 if time.monotonic() > deadline:
-                    raise RuntimeError("Otro proceso está arrancando el visor. Vuelve a intentarlo.")
+                    raise RuntimeError("Another process is starting Visor. Try again.")
                 time.sleep(0.1)
         state = running()
         if state:
             return state
         if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-            raise RuntimeError("No hay sesión gráfica. Ejecuta visor en tu escritorio local.")
+            raise RuntimeError("No graphical session. Run visor on your local desktop.")
         Path(socket_path()).unlink(missing_ok=True)
         logdir = data_dir()
         logdir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -104,4 +104,4 @@ def ensure_running():
             time.sleep(0.1)
         if child.poll() is None:
             child.terminate()
-        raise RuntimeError(f"No se pudo abrir la ventana. Comprueba el acceso al escritorio y {logpath}")
+        raise RuntimeError(f"Could not open the window. Check desktop access and {logpath}")

@@ -11,7 +11,7 @@ Use the installed local command to show useful visual results as part of the wor
 ~/.local/bin/visor show /absolute/path/to/result.png --title "Distribution by group" --caption "The two groups show different variance."
 ```
 
-The command starts the window when closed and reuses it when open. It returns after the window receives the image; it selects it when “Seguir lo nuevo” is enabled. Continue working after the call; no manual app launch or background server setup is needed. PDF, PNG, JPEG, WebP, GIF, TIFF and BMP are supported; GIFs show their first frame. Export SVG plots to PNG or PDF before showing them. The original file stays untouched, and the viewer saves an immutable copy.
+The command starts the window when closed and reuses it when open. It returns after the window receives the image; it selects it when “Follow latest” is enabled. Continue working after the call; no manual app launch or background server setup is needed. PDF, PNG, JPEG, WebP, GIF, TIFF and BMP are supported; GIFs show their first frame. Export SVG plots to PNG or PDF before showing them. The original file stays untouched, and the viewer saves an immutable copy.
 
 The working directory is the default project/history group. Call from the user's project directory, or use `--session "project / conversation"` consistently when separate conversations need separate histories. Multiple paths can be sent in one call; the last is selected. Repeating a show call records a new version.
 
@@ -35,6 +35,6 @@ The user turns slides with ←/→ or PgUp/PgDn. A call accepts up to 100 images
 
 When run from Claude Code, `visor show` records the session that showed the image (from `CLAUDE_CODE_SESSION_ID`); no flag is needed. The user can then ask about that image in Visor's side panel, which answers from a read-only fork of this session (Read, Grep, Glob only) and leaves this session untouched. Clear titles and captions help the fork identify the figure being asked about.
 
-The newest displayed source file is also watched while “Seguir lo nuevo” is enabled. Regenerating it updates the view and retains the old snapshot. Default updates do not raise or focus the existing window. Add `--focus` only when the user explicitly wants it brought to the front. Respect a user disabling “Seguir lo nuevo”; incoming images still enter history.
+The newest displayed source file is also watched while “Follow latest” is enabled. Regenerating it updates the view and retains the old snapshot. Default updates do not raise or focus the existing window. Add `--focus` only when the user explicitly wants it brought to the front. Respect a user disabling “Follow latest”; incoming images still enter history.
 
 Show useful milestones and final outputs, rather than every intermediate frame. Choose titles and captions in the user's language. A successful show confirms delivery, not the user's approval of the image. With `--json`, `queued: true` means it entered history while the user kept a previous image selected. Do not claim the user has reviewed it. If the viewer cannot access a graphical desktop or an image is inaccessible locally, report the error and retain a normal file link as a fallback. An environment permission failure does not mean the app must be launched by the user; use the environment's normal permission mechanism where available.

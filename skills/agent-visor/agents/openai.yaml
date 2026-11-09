@@ -1,6 +1,6 @@
 interface:
   display_name: "Visor"
-  short_description: "Muestra imágenes y gráficos en tu ventana local"
-  default_prompt: "Usa $agent-visor para mostrarme los resultados visuales de este trabajo."
+  short_description: "Shows images and plots in your local window"
+  default_prompt: "Use $agent-visor to show me the visual results of this work."
 policy:
   allow_implicit_invocation: true

@@ -34,9 +34,9 @@ def signature(path: Path) -> str:
 
 def check_size(path: Path):
     if not path.is_file():
-        raise ValueError(f"No existe el archivo: {path}")
+        raise ValueError(f"File not found: {path}")
     if path.stat().st_size > MAX_FILE_BYTES:
-        raise ValueError(f"El archivo supera los 100 MB: {path.name}")
+        raise ValueError(f"File is larger than 100 MB: {path.name}")
 
 
 def load_image(path: Path) -> Image.Image:
@@ -46,12 +46,12 @@ def load_image(path: Path) -> Image.Image:
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(path, formats=FORMATS) as image:
                 if image.width * image.height > MAX_PIXELS:
-                    raise ValueError(f"La imagen supera los 24 megapíxeles: {path.name}")
+                    raise ValueError(f"Image is larger than 24 megapixels: {path.name}")
                 image.seek(0)
                 image.load()
                 return ImageOps.exif_transpose(image).convert("RGBA")
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise ValueError(f"No se puede leer {path.name}. Usa PDF, PNG, JPEG, WebP, GIF, TIFF o BMP.") from exc
+        raise ValueError(f"Cannot read {path.name}. Use PDF, PNG, JPEG, WebP, GIF, TIFF or BMP.") from exc
 
 
 def is_pdf(path: Path) -> bool:
@@ -62,11 +62,11 @@ def is_pdf(path: Path) -> bool:
 
 def pdf_page_count(path: Path) -> int:
     if not (shutil.which("pdfinfo") and shutil.which("pdftoppm")):
-        raise ValueError("Para mostrar PDF hace falta poppler-utils (pdfinfo y pdftoppm).")
+        raise ValueError("Showing PDFs needs poppler-utils (pdfinfo and pdftoppm).")
     result = subprocess.run(["pdfinfo", str(path)], capture_output=True, text=True, timeout=60)
     match = re.search(r"^Pages:\s+(\d+)", result.stdout, re.M)
     if result.returncode or not match or int(match.group(1)) < 1:
-        raise ValueError(f"No se puede leer el PDF {path.name}.")
+        raise ValueError(f"Cannot read the PDF {path.name}.")
     return int(match.group(1))
 
 
@@ -88,7 +88,7 @@ def load_pages(path: Path):
         result = subprocess.run(["pdftoppm", "-png", "-scale-to", str(PDF_LONG_SIDE), str(path), f"{tmp}/page"],
                                 capture_output=True, text=True, timeout=600)
         if result.returncode:
-            raise ValueError(f"No se puede convertir el PDF {path.name}: {result.stderr.strip()[:300]}")
+            raise ValueError(f"Cannot convert the PDF {path.name}: {result.stderr.strip()[:300]}")
         # pdftoppm pads page numbers to equal width, so name order is page order.
         for page in sorted(Path(tmp).glob("page-*.png")):
             yield load_image(page)
@@ -141,9 +141,9 @@ class Store:
     def ingest(self, paths, session, title="", caption="", deck=False, agent_session=None, agent_cwd=None):
         """Store every path; a PDF becomes one deck, and deck=True joins the whole call into one."""
         if not isinstance(session, str) or not session.strip() or len(session) > 200:
-            raise ValueError("El proyecto debe tener entre 1 y 200 caracteres.")
+            raise ValueError("The project name must have 1 to 200 characters.")
         if not paths or len(paths) > 30:
-            raise ValueError("Envía entre 1 y 30 imágenes por llamada.")
+            raise ValueError("Send between 1 and 30 images per call.")
         prepared = []
         written = []
         shared = uuid.uuid4().hex if deck else None
@@ -156,7 +156,7 @@ class Store:
                 for image in load_pages(path):
                     if len(prepared) + len(rows) >= MAX_PAGES:
                         image.close()
-                        raise ValueError(f"Envía como máximo {MAX_PAGES} imágenes o páginas por llamada.")
+                        raise ValueError(f"Send at most {MAX_PAGES} images or pages per call.")
                     item_id = uuid.uuid4().hex
                     snapshot = self.assets / f"{item_id}.png"
                     image.save(snapshot, "PNG")
@@ -174,7 +174,7 @@ class Store:
                     image.close()
                 after = signature(path)
                 if before != after:
-                    raise ValueError(f"El archivo está cambiando; vuelve a intentarlo: {path.name}")
+                    raise ValueError(f"The file is changing; try again: {path.name}")
                 for row in rows:
                     row["signature"] = after
                 prepared.extend(rows)
