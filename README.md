@@ -34,9 +34,15 @@ When Claude Code shows an image, `visor show` also records which session showed 
 
 The fork can only read and search (`Read`, `Grep`, `Glob`, no MCP servers). It cannot edit files or run commands, because nobody can approve permissions from the window. The original session is left unchanged. The fork copies the session as it is when you ask, so it also knows what happened after the image was shown. Each version of a figure has its own thread. Images that did not come from Claude Code (from Codex, or opened by hand) have no session to ask.
 
+## Projects and conversations
+
+The button at the top of the sidebar names the project being shown. Click it to browse every conversation Visor has stored, grouped by project and most recently used first, each with its latest image, how many figures it holds and when it last changed. Type to filter by any part of the name, move with the up/down arrows, press `Enter` to open one and `Esc` to go back.
+
+A conversation is one `--session` value, or one folder. `--session "Study / comparison"` is the conversation "comparison" of the project "Study". A folder is filed under its git repository, so a subfolder or a linked worktree (`git worktree`) appears as a conversation of the main repository's project, next to that project's named conversations.
+
 ## Recent history
 
-The **All**, **Today** and **Last hour** buttons under HISTORY filter entries by date. Hidden entries stay saved, and the chosen filter is remembered.
+The history of a conversation is listed newest first under a heading per day. The **All**, **Today** and **Last hour** buttons under HISTORY filter entries by date. Hidden entries stay saved, and the chosen filter is remembered.
 
 ## Updates and focus
 
@@ -52,9 +58,11 @@ The first call opens the window. Later calls update it without raising it or tak
 - Page Up/Page Down: previous/next slide (works with presentation clickers).
 - Up/down arrows and the ← → buttons: newer/older history entry.
 - `Ctrl+O`: open images by hand.
+- `S` or the button at the left of the header: close or reopen the sidebar. The ✕ at the top of the question panel (or **Ask**) closes that panel. With both closed the figure has the whole window; the choice is remembered.
 - Right-click on the image: mark a point to ask about the element there. Opens the question panel if it is closed.
 - In the question panel: `Enter` sends and `Shift+Enter` adds a line. While you type, the window shortcuts are off; click the image to get them back.
 - **EN | ES** in the header switches the interface between English and Spanish.
+- The four dots in the header choose the colours of the window: sand (warm, the default), stone (grey and white), sky (bluish) and dark. The choice is remembered.
 
 ## Accessibility
 

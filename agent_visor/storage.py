@@ -94,6 +94,32 @@ def load_pages(path: Path):
             yield load_image(page)
 
 
+def conversation(session: str) -> tuple[str, str]:
+    """(project, conversation) the window files a history group under.
+    "Study / comparison" is the conversation "comparison" of the project "Study". A folder belongs to its git
+    repository: a subfolder or a linked worktree is a conversation of the main repository's project."""
+    if not session.startswith("/"):
+        project, _, label = session.partition(" / ")
+        return project.strip() or session, label.strip()
+    path = Path(session)
+    for root in (path, *path.parents):
+        if root == Path.home():  # a repository of dotfiles in the home folder is not a project
+            break
+        marker = root / ".git"
+        try:
+            if marker.is_file():  # linked worktree: "gitdir: <main>/.git/worktrees/<name>"
+                match = re.match(r"gitdir: (.+)/\.git/worktrees/", marker.read_text(errors="replace"))
+                if match:
+                    main = Path(match.group(1)).name
+                    name = root.name.removeprefix(main).lstrip("-_ ") or root.name
+                    return main, "/".join([name, *path.relative_to(root).parts])
+            if marker.exists():
+                return root.name, "/".join(path.relative_to(root).parts)
+        except OSError:
+            break
+    return path.name or session, ""
+
+
 class Store:
     def __init__(self, directory: Path | None = None):
         self.directory = directory or data_dir()
@@ -203,7 +229,9 @@ class Store:
     def sessions(self):
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT session,COUNT(*) AS count,MAX(created) AS updated FROM images GROUP BY session ORDER BY updated DESC")]
+                # entries: history entries (a deck counts once). snapshot: the newest image (SQLite takes it from the MAX row).
+                "SELECT session,COUNT(*) AS count,COUNT(DISTINCT COALESCE(deck,id)) AS entries,MAX(created) AS updated,snapshot "
+                "FROM images GROUP BY session ORDER BY updated DESC")]
 
     def history(self, session=None, limit=200, collapse=False, since=None):
         """Newest first. collapse=True lists each deck once, by its first slide; since keeps entries from that time on."""

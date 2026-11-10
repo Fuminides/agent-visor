@@ -196,6 +196,28 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(versions[second["id"]], (2, 2))
         self.assertEqual(versions[unrelated["id"]], (1, 1))
 
+    def test_conversations_are_filed_under_their_project(self):
+        from agent_visor.storage import conversation
+        self.assertEqual(conversation("Study / comparison"), ("Study", "comparison"))
+        self.assertEqual(conversation("Demo"), ("Demo", ""))
+        repo, tree = self.directory / "atlas", self.directory / "atlas-wt-look"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "paper/figures").mkdir(parents=True)
+        tree.mkdir()
+        (tree / ".git").write_text(f"gitdir: {repo}/.git/worktrees/atlas-wt-look\n")
+        self.assertEqual(conversation(str(repo)), ("atlas", ""))
+        self.assertEqual(conversation(str(repo / "paper/figures")), ("atlas", "paper/figures"))
+        self.assertEqual(conversation(str(tree)), ("atlas", "wt-look"))  # a worktree joins its main repository
+        self.assertEqual(conversation(str(self.directory / "gone/folder")), ("folder", ""))
+        deck = self.directory / "deck.pdf"
+        pages = [Image.new("RGB", (160, 90), "white") for _ in range(3)]
+        pages[0].save(deck, save_all=True, append_images=pages[1:])
+        self.store.ingest([str(self.source)], "Study / comparison")
+        self.store.ingest([str(deck)], "Study / comparison")
+        row = self.store.sessions()[0]
+        self.assertEqual((row["count"], row["entries"]), (4, 2))  # the deck is one entry
+        self.assertEqual(row["snapshot"], self.store.history("Study / comparison")[0]["snapshot"])
+
     def test_no_session_basename_collision(self):
         with patch.dict(os.environ, {}, clear=True), patch("pathlib.Path.cwd", return_value=Path("/a/project")):
             self.assertEqual(default_session(), "/a/project")
@@ -210,10 +232,39 @@ class IconTests(unittest.TestCase):
         colours = {colour for _, colour in mark.getcolors(maxcolors=40 * 40)}
         self.assertGreater(len(colours), 10)  # blended edge pixels, not just two flat colours
         background = mark.getpixel((0, 0))
-        darkest = min(sum(pixel) for pixel in colours)
-        self.assertGreaterEqual(darkest, sum(background))  # nothing darker than the background: no ringing halo
+        lightest = max(sum(pixel) for pixel in colours)
+        self.assertLessEqual(lightest, sum((255, 255, 255)))
+        darkest = min(colours, key=sum)
+        self.assertGreaterEqual(sum(darkest), sum(mark.getpixel((20, 6))))  # nothing darker than the disc: no ringing halo
+        self.assertEqual("#%02x%02x%02x" % background, BG)
         icon = visor_mark(256, ACCENT, BG, square=True)
         self.assertEqual(icon.getpixel((0, 0))[3], 0)  # transparent outside the rounded square
+
+    def test_every_theme_keeps_text_and_focus_readable(self):
+        from agent_visor.app import THEMES, SWATCHES
+
+        def luminance(colour):
+            parts = [int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            red, green, blue = [c / 12.92 if c <= .03928 else ((c + .055) / 1.055) ** 2.4 for c in parts]
+            return .2126 * red + .7152 * green + .0722 * blue
+
+        def ratio(first, second):
+            high, low = sorted((luminance(first), luminance(second)), reverse=True)
+            return (high + .05) / (low + .05)
+
+        self.assertEqual(set(THEMES), set(SWATCHES))
+        for name, theme in THEMES.items():
+            self.assertEqual(set(theme), set(THEMES["sand"]), name)
+            for surface in ("BG", "PANEL", "CARD", "SELECTED", "FIELD", "STAGE"):
+                for text in ("INK", "MUTED"):
+                    self.assertGreaterEqual(ratio(theme[text], theme[surface]), 4.5, f"{name}: {text} on {surface}")
+            for surface in ("PANEL", "SELECTED"):
+                self.assertGreaterEqual(ratio(theme["ACCENT_TEXT"], theme[surface]), 4.5, f"{name}: accent text on {surface}")
+            self.assertGreaterEqual(ratio(theme["ERROR"], theme["PANEL"]), 4.5, name)
+            self.assertGreaterEqual(ratio(theme["ON_ACCENT"], theme["ACCENT"]), 4.5, name)
+            self.assertGreaterEqual(ratio(theme["BG"], theme["INK"]), 4.5, name)  # a chosen pill
+            for surface in ("PANEL", "FIELD"):  # the question box's focus edge
+                self.assertGreaterEqual(ratio(theme["ACCENT"], theme[surface]), 3, f"{name}: focus on {surface}")
 
 
 class LanguageTests(unittest.TestCase):
@@ -568,15 +619,20 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                 store.set_setting("geometry", "820x540")
                 app = Visor(root, store)
                 root.update()
-                self.assertEqual(app.session_var.get(), "No projects yet")
+                self.assertIn("No projects yet", app.session_button.cget("text"))
+                self.assertEqual(str(app.session_button.cget("state")), "disabled")
                 one, two = directory / "one.png", directory / "two.png"
                 Image.new("RGB", (300, 200), "white").save(one)
                 Image.new("RGB", (300, 200), "black").save(two)
                 items = store.ingest([str(one)], "Fix") + store.ingest([str(two)], "Fix")
                 app.dispatch({"action": "received", "items": items[-1:]})
                 root.update()
-                tags = [label.cget("text") for card in app.cards.values() for label in card.winfo_children()
-                        if isinstance(label, tk.Label) and label.cget("text").isupper()]
+                def labels(widget):
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Label):
+                            yield child.cget("text")
+                        yield from labels(child)
+                tags = [text for card in app.cards.values() for text in labels(card) if text.isupper()]
                 self.assertEqual(tags, ["LATEST"])  # two different files: no version tags
                 self.assertEqual(app.count_label.cget("text"), "2 / 2")
                 self.assertIn("two.png   ·   " + str(directory), app.detail_label.cget("text"))
@@ -588,10 +644,35 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                 self.assertGreaterEqual(app.canvas.winfo_width() / root.winfo_width(), .4)
                 self.assertEqual(app.chat_bottom.winfo_manager(), "")
                 self.assertEqual(app.chat_actions.winfo_manager(), "")
-                self.assertEqual(app.ask_button.cget("bg"), "#87d8bc")
+                self.assertEqual(app.ask_button.kind, "chosen")
                 app.toggle_chat()
                 self.assertEqual(root.minsize()[0], 820)
-                self.assertNotEqual(app.ask_button.cget("bg"), "#87d8bc")
+                self.assertEqual(app.ask_button.kind, "plain")
+                # Closing the sidebar gives its width to the figure, and the choice is remembered.
+                root.update()
+                before = app.canvas.winfo_width()
+                app.toggle_sidebar()
+                root.update()
+                self.assertFalse(app.sidebar.winfo_ismapped())
+                self.assertEqual(app.canvas.winfo_width(), before + app.sidebar.winfo_reqwidth())
+                self.assertFalse(Store(directory / "data").setting("sidebar_open"))
+                app.set_language("es")
+                root.update()
+                self.assertFalse(app.sidebar.winfo_ismapped())
+                app.set_language("en")
+                app.toggle_sidebar()
+                root.update()
+                self.assertTrue(app.sidebar.winfo_ismapped())
+                self.assertLess(app.sidebar.winfo_x(), app.main.winfo_x())
+                # A theme repaints the whole window, keeps what is shown and is remembered.
+                shown = app.current["id"]
+                for theme, background in (("dark", "#262624"), ("sky", "#edf1f6"), ("stone", "#f1f1f0"), ("sand", "#f0eee6")):
+                    app.set_theme(theme)
+                    root.update()
+                    self.assertEqual(app.main.cget("bg"), background)
+                    self.assertEqual(app.canvas.master.cget("bg"), root.cget("bg"))
+                    self.assertEqual(app.current["id"], shown)
+                    self.assertEqual(Store(directory / "data").setting("theme"), theme)
                 # Every button shows a focus ring.
                 def buttons(widget):
                     for child in widget.winfo_children():
@@ -627,6 +708,59 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                 root.update()
                 self.assertLessEqual(int(app.chat_status.cget("wraplength")), int(app.chat.cget("width")) - 36)
                 app.toggle_chat()
+            finally:
+                root.destroy()
+
+    def test_conversation_browser_groups_filters_and_opens(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            directory = Path(directory)
+            image = directory / "plot.png"
+            Image.new("RGB", (300, 200), "white").save(image)
+            store = Store(directory / "data")
+            for session in ("Atlas / landing", "Atlas / static", "Notes"):
+                store.ingest([str(image)], session)
+            root = tk.Tk()
+            try:
+                app = Visor(root, store)
+                root.update()
+                self.assertEqual(app.session, "Notes")
+                self.assertIn("Notes", app.session_button.cget("text"))
+                app.session_button.invoke()
+                root.update()
+                self.assertTrue(app.browser_view.winfo_ismapped())
+                self.assertFalse(app.history_view.winfo_ismapped())
+                # Newest first; the two conversations of Atlas sit together under its name.
+                self.assertEqual([session for session, _ in app.browser_rows], ["Notes", "Atlas / static", "Atlas / landing"])
+                texts = [child.cget("text") for child in app.browser_frame.winfo_children() if isinstance(child, tk.Label)]
+                self.assertEqual(texts, ["Atlas"])
+                self.assertEqual(app.browser_index, 0)  # the keyboard starts on the conversation shown
+                # Typing in the filter must not trigger the window shortcuts.
+                app.filter_entry.focus_force()
+                root.update()
+                app.key(lambda: self.fail("shortcut fired while filtering"))(None)
+                app.filter_var.set("atlas land")
+                self.assertEqual([session for session, _ in app.browser_rows], ["Atlas / landing"])
+                app.filter_var.set("nothing like this")
+                self.assertEqual(app.browser_rows, [])
+                app.filter_var.set("atlas")
+                app.move_browser(1)
+                app.pick_browser()
+                root.update()
+                self.assertEqual(app.session, "Atlas / landing")
+                self.assertTrue(app.history_view.winfo_ismapped())
+                self.assertIn("Atlas", app.session_button.cget("text"))
+                self.assertEqual(app.session_detail.cget("text"), "landing")
+                self.assertEqual(app.current["session"], "Atlas / landing")
+                # A new image arriving while browsing refreshes the list in place.
+                app.toggle_browser()
+                app.follow.set(False)
+                app.dispatch({"action": "received", "items": store.ingest([str(image)], "Fresh")})
+                self.assertEqual(app.browser_rows[0][0], "Fresh")
+                app.set_language("es")
+                root.update()
+                self.assertTrue(app.history_view.winfo_ismapped())
             finally:
                 root.destroy()
 
@@ -746,15 +880,24 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                 while stack:
                     widget = stack.pop()
                     stack.extend(widget.winfo_children())
-                    if isinstance(widget, (tk.Button, tk.Checkbutton, tk.Text)) and str(widget.cget("takefocus")) != "0":
-                        name = widget.cget("text") if "text" in widget.keys() else widget.winfo_class()
+                    if isinstance(widget, (tk.Button, tk.Checkbutton)):
+                        name = widget.cget("text")
                         self.assertGreaterEqual(int(widget.cget("highlightthickness")), 1, name)
                         around = widget.master.cget("bg")
                         self.assertGreaterEqual(ratio(widget.cget("highlightcolor"), around, widget), 3, name)
-                        if not isinstance(widget, tk.Text):  # text fields keep a visible border on purpose
-                            self.assertEqual(widget.winfo_rgb(widget.cget("highlightbackground")), widget.winfo_rgb(around), name)
+                        self.assertEqual(widget.winfo_rgb(widget.cget("highlightbackground")), widget.winfo_rgb(around), name)
                         checked += 1
                 self.assertGreater(checked, 20)
+                # The question box shows focus on its own rounded edge, which is invisible otherwise.
+                edge, around = app.composer_ring, app.composer_ring.master.cget("bg")
+                self.assertEqual(edge.cget("bg"), app.chat_input.cget("bg"))
+                app.chat_input.focus_force()
+                root.update()
+                self.assertGreaterEqual(ratio(edge.cget("bg"), around, edge), 3)
+                self.assertGreaterEqual(ratio(edge.cget("bg"), app.chat_input.cget("bg"), edge), 3)
+                app.canvas.focus_force()
+                root.update()
+                self.assertEqual(edge.cget("bg"), app.chat_input.cget("bg"))
             finally:
                 root.destroy()
 
@@ -776,8 +919,7 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                 root.geometry("1640x1000")
                 root.update()
                 self.assertEqual(app.factor, 2)
-                sidebar = app.count_label.master.master
-                self.assertEqual(sidebar.winfo_width(), 528)
+                self.assertEqual(app.sidebar.winfo_width(), 544)
                 # No label or button gets less room than it asks for (Tk shrinks a widget rather than overflow,
                 # so a clipped text shows up as width < reqwidth). The detail line truncates long paths on purpose.
                 clipped, stack = [], [root]
