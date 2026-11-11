@@ -15,6 +15,8 @@ import warnings
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from .runs import empty
+
 FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "TIFF", "BMP", "ICO")
 MAX_PIXELS = 24_000_000
 MAX_FILE_BYTES = 100 * 1024 * 1024
@@ -141,9 +143,10 @@ class Store:
             """)
             # Slides of one presentation share a deck id; single images keep these columns NULL.
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(images)")}
-            # agent_session/agent_cwd: the Claude Code session that showed the image, for the chat panel.
+            # Agent origin belongs to each entry; old entries without a provider are Claude Code.
             for name, kind in (("deck", "TEXT"), ("page", "INTEGER"), ("pages", "INTEGER"),
-                               ("agent_session", "TEXT"), ("agent_cwd", "TEXT")):
+                               ("agent_session", "TEXT"), ("agent_cwd", "TEXT"),
+                               ("agent_provider", "TEXT"), ("agent_socket", "TEXT")):
                 if name not in columns:
                     try:
                         conn.execute(f"ALTER TABLE images ADD COLUMN {name} {kind}")
@@ -158,13 +161,40 @@ class Store:
                 CREATE TABLE IF NOT EXISTS messages (thread TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, created REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread, created);
             """)
+            # A live run: a progress file being followed. data holds what was read from it (see runs.py);
+            # offset is how far into the file that is; closed runs are no longer followed.
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS runs (
+                    id TEXT PRIMARY KEY, session TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL,
+                    metrics TEXT NOT NULL, notes TEXT NOT NULL, data TEXT NOT NULL, offset INTEGER NOT NULL,
+                    error TEXT, closed INTEGER NOT NULL, created REAL NOT NULL, updated REAL NOT NULL,
+                    agent_session TEXT, agent_cwd TEXT
+                );
+                CREATE INDEX IF NOT EXISTS runs_session_created ON runs(session, created DESC);
+            """)
+
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+            for name in ("agent_provider", "agent_socket"):
+                if name not in columns:
+                    try:
+                        conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT")
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column" not in str(exc):
+                            raise
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(threads)")}
+            if "mode" not in columns:
+                conn.execute("ALTER TABLE threads ADD COLUMN mode TEXT NOT NULL DEFAULT 'figure'")
+                # Preserve the meaning of chats created before the mode selector existed.
+                conn.execute("""UPDATE threads SET mode='live' WHERE entry IN (
+                    SELECT COALESCE(deck,id) FROM images WHERE agent_provider='codex'
+                    UNION SELECT id FROM runs WHERE agent_provider='codex')""")
 
     def connect(self):
         conn = sqlite3.connect(self.db, timeout=15)
         conn.row_factory = sqlite3.Row
         return conn
 
-    def ingest(self, paths, session, title="", caption="", deck=False, agent_session=None, agent_cwd=None):
+    def ingest(self, paths, session, title="", caption="", deck=False, agent_session=None, agent_cwd=None, agent_provider=None, agent_socket=None):
         """Store every path; a PDF becomes one deck, and deck=True joins the whole call into one."""
         if not isinstance(session, str) or not session.strip() or len(session) > 200:
             raise ValueError("The project name must have 1 to 200 characters.")
@@ -196,7 +226,7 @@ class Store:
                     rows.append(dict(id=item_id, session=session.strip(), title=(title or path.stem)[:300],
                         caption=caption[:2000], source=str(path), snapshot=str(snapshot),
                         width=image.width, height=image.height, created=time.time(), deck=group,
-                        agent_session=agent_session, agent_cwd=agent_cwd))
+                        agent_session=agent_session, agent_cwd=agent_cwd, agent_provider=agent_provider, agent_socket=agent_socket))
                     image.close()
                 after = signature(path)
                 if before != after:
@@ -217,9 +247,44 @@ class Store:
                 row.setdefault("pages", None)
             with self.connect() as conn:
                 conn.executemany("""INSERT INTO images
-                    (id,session,title,caption,source,snapshot,width,height,created,signature,deck,page,pages,agent_session,agent_cwd)
+                    (id,session,title,caption,source,snapshot,width,height,created,signature,deck,page,pages,agent_session,agent_cwd,agent_provider,agent_socket)
                     VALUES (:id,:session,:title,:caption,:source,:snapshot,:width,:height,:created,:signature,:deck,:page,:pages,
-                            :agent_session,:agent_cwd)""", prepared)
+                            :agent_session,:agent_cwd,:agent_provider,:agent_socket)""", prepared)
+        except Exception:
+            for path in written:
+                path.unlink(missing_ok=True)
+            raise
+        return prepared
+
+    def adopt(self, rows):
+        """Store one history entry shown on another computer (see mirror.py): its rows as that computer keeps
+        them, each with its picture in "png". Returns the rows stored: none when the entry was here already."""
+        if not all(re.fullmatch(r"[0-9a-f]{32}", str(row["id"])) for row in rows):  # the id names the files
+            raise ValueError("Unexpected entry id.")
+        if any(self.get(row["id"]) for row in rows):
+            return []
+        prepared, written = [], []
+        try:
+            for row in rows:
+                snapshot = self.assets / f"{row['id']}.png"
+                snapshot.write_bytes(row["png"])
+                written.append(snapshot)
+                with load_image(snapshot) as image:
+                    width, height = image.size
+                    thumbnail = image.copy()
+                thumbnail.thumbnail((124, 90))
+                thumbnail.save(snapshot.with_suffix(".thumb.png"), "PNG")
+                written.append(snapshot.with_suffix(".thumb.png"))
+                prepared.append(dict(id=row["id"], session=row["session"], title=str(row["title"])[:300],
+                    caption=str(row["caption"])[:2000], source=str(row["source"]), snapshot=str(snapshot),
+                    width=width, height=height, created=float(row["created"]), signature="",
+                    deck=row["deck"], page=row["page"], pages=row["pages"],
+                    agent_session=None, agent_cwd=None, agent_provider=None, agent_socket=None))
+            with self.connect() as conn:
+                conn.executemany("""INSERT INTO images
+                    (id,session,title,caption,source,snapshot,width,height,created,signature,deck,page,pages,agent_session,agent_cwd,agent_provider,agent_socket)
+                    VALUES (:id,:session,:title,:caption,:source,:snapshot,:width,:height,:created,:signature,:deck,:page,:pages,
+                            :agent_session,:agent_cwd,:agent_provider,:agent_socket)""", prepared)
         except Exception:
             for path in written:
                 path.unlink(missing_ok=True)
@@ -228,10 +293,15 @@ class Store:
 
     def sessions(self):
         with self.connect() as conn:
-            return [dict(row) for row in conn.execute(
+            rows = {row["session"]: dict(row) for row in conn.execute(
                 # entries: history entries (a deck counts once). snapshot: the newest image (SQLite takes it from the MAX row).
                 "SELECT session,COUNT(*) AS count,COUNT(DISTINCT COALESCE(deck,id)) AS entries,MAX(created) AS updated,snapshot "
-                "FROM images GROUP BY session ORDER BY updated DESC")]
+                "FROM images GROUP BY session")}
+            # A live run is one more entry of its conversation; a conversation may hold only runs.
+            for run in conn.execute("SELECT session,COUNT(*) AS entries,MAX(created) AS updated FROM runs GROUP BY session"):
+                row = rows.setdefault(run["session"], dict(session=run["session"], count=0, entries=0, updated=0, snapshot=None))
+                row.update(entries=row["entries"] + run["entries"], updated=max(row["updated"], run["updated"]))
+        return sorted(rows.values(), key=lambda row: row["updated"], reverse=True)
 
     def history(self, session=None, limit=200, collapse=False, since=None):
         """Newest first. collapse=True lists each deck once, by its first slide; since keeps entries from that time on."""
@@ -276,16 +346,91 @@ class Store:
             row = conn.execute("SELECT COALESCE(deck, id) AS entry FROM images WHERE session=? AND source=? ORDER BY created DESC LIMIT 1", (session, source)).fetchone()
             return row["entry"] if row else None
 
-    def thread(self, entry):
+    def track(self, source, session, title="", metrics=None, agent_session=None, agent_cwd=None, agent_provider=None, agent_socket=None):
+        """Follow a progress file. Calling again for a file this conversation already follows updates that run
+        (and follows it again if it had stopped) instead of adding another."""
+        if not isinstance(session, str) or not session.strip() or len(session) > 200:
+            raise ValueError("The project name must have 1 to 200 characters.")
+        if not source or len(source) > 1000:
+            raise ValueError("The file to follow must have 1 to 1000 characters.")
+        now = time.time()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE session=? AND source=? ORDER BY created DESC LIMIT 1",
+                               (session.strip(), source)).fetchone()
+            if row:
+                conn.execute("UPDATE runs SET title=?, metrics=?, closed=0, updated=?, agent_session=?, agent_cwd=?, agent_provider=?, agent_socket=? WHERE id=?",
+                             (title[:300] or row["title"], row["metrics"] if metrics is None else json.dumps(metrics), now,
+                              agent_session or row["agent_session"], agent_cwd or row["agent_cwd"],
+                              agent_provider if agent_session else row["agent_provider"],
+                              agent_socket if agent_session else row["agent_socket"], row["id"]))
+                return self.run(row["id"], conn)
+        return self.new_run(dict(session=session.strip(), title=title[:300] or source.rsplit("/", 1)[-1], source=source,
+                                 metrics=metrics or [], agent_session=agent_session, agent_cwd=agent_cwd, agent_provider=agent_provider, agent_socket=agent_socket))
+
+    def new_run(self, row):
+        row = dict({"agent_provider": None, "agent_socket": None}, **row)
+        row = dict(row, id=uuid.uuid4().hex, notes=[], data=empty(), offset=0, error=None, closed=0,
+                   created=time.time(), updated=time.time(), kind="run")
+        with self.connect() as conn:
+            conn.execute("""INSERT INTO runs VALUES (:id,:session,:title,:source,:metrics,:notes,:data,:offset,:error,:closed,
+                            :created,:updated,:agent_session,:agent_cwd,:agent_provider,:agent_socket)""",
+                         dict(row, metrics=json.dumps(row["metrics"]), notes="[]", data=json.dumps(row["data"])))
+        return row
+
+    def restart_run(self, run):
+        """The file of a run started again: leave what was read as it is and continue in a new entry."""
+        self.save_run(run["id"], closed=1)
+        return self.new_run({key: run[key] for key in ("session", "title", "source", "metrics", "agent_session", "agent_cwd", "agent_provider", "agent_socket")})
+
+    def run(self, run_id, conn=None):
+        row = (conn or self.connect()).execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        return self._run(row) if row else None
+
+    @staticmethod
+    def _run(row):
+        # kind tells a run from an image wherever history entries are handled together.
+        return dict(row, kind="run", **{key: json.loads(row[key]) for key in ("metrics", "notes", "data")})
+
+    def runs(self, session=None, since=None, following=False):
+        """Newest first. following=True keeps only the runs still being followed."""
+        where, values = [], []
+        for clause, value in (("session=?", session), ("created>=?", since)):
+            if value is not None:
+                where.append(clause)
+                values.append(value)
+        if following:
+            where.append("closed=0")
+        sql = "SELECT * FROM runs" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created DESC LIMIT 200"
+        with self.connect() as conn:
+            return [self._run(row) for row in conn.execute(sql, values)]
+
+    def save_run(self, run_id, **fields):
+        """Set columns of a run: offset, data, error, closed, updated."""
+        if "data" in fields:
+            fields["data"] = json.dumps(fields["data"])
+        with self.connect() as conn:
+            conn.execute(f"UPDATE runs SET {','.join(f'{key}=?' for key in fields)} WHERE id=?", (*fields.values(), run_id))
+
+    def add_note(self, run_id, text):
+        """A dated remark from the agent, shown with the run. The newest 20 are kept."""
+        with self.connect() as conn:
+            notes = json.loads(conn.execute("SELECT notes FROM runs WHERE id=?", (run_id,)).fetchone()["notes"])
+            notes = (notes + [[time.time(), text[:2000]]])[-20:]
+            conn.execute("UPDATE runs SET notes=? WHERE id=?", (json.dumps(notes), run_id))
+
+    def thread(self, entry, mode=None):
         """Newest chat thread of a history entry, or None."""
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM threads WHERE entry=? ORDER BY created DESC LIMIT 1", (entry,)).fetchone()
+            where, values = ("entry=?", (entry,)) if mode is None else ("entry=? AND mode=?", (entry, mode))
+            row = conn.execute(f"SELECT * FROM threads WHERE {where} ORDER BY created DESC LIMIT 1", values).fetchone()
             return dict(row) if row else None
 
-    def new_thread(self, entry):
-        row = dict(id=uuid.uuid4().hex, entry=entry, fork=None, created=time.time())
+    def new_thread(self, entry, mode="figure"):
+        if mode not in ("figure", "live"):
+            raise ValueError("Unknown chat mode.")
+        row = dict(id=uuid.uuid4().hex, entry=entry, fork=None, created=time.time(), mode=mode)
         with self.connect() as conn:
-            conn.execute("INSERT INTO threads VALUES (:id, :entry, :fork, :created)", row)
+            conn.execute("INSERT INTO threads (id,entry,fork,created,mode) VALUES (:id,:entry,:fork,:created,:mode)", row)
         return row
 
     def set_fork(self, thread, fork):

@@ -1,4 +1,4 @@
-"""Ask the Claude Code session that showed a figure, in a read-only fork of it. No GUI imports here."""
+"""Origin metadata and prompts for questions about a figure. No GUI imports here."""
 from __future__ import annotations
 
 import json
@@ -14,6 +14,18 @@ SESSION_ID = re.compile(r"^[0-9a-fA-F-]{36}$")
 # The fork can look at the project but never change it: no Bash, no edits, no MCP servers.
 READ_ONLY_TOOLS = "Read,Grep,Glob"
 RED = (229, 72, 77)
+
+
+def origin():
+    """Capture the caller, never the environment of the long-running Visor window."""
+    claude = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    codex = os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID", "")
+    session, provider = (claude, "claude") if SESSION_ID.fullmatch(claude) else (codex, "codex")
+    if not SESSION_ID.fullmatch(session):
+        return {}
+    from .codex import control_socket
+    return dict(agent_session=session, agent_provider=provider, agent_cwd=str(Path.cwd()),
+                agent_socket=control_socket() if provider == "codex" else None)
 
 
 def claude_binary():
@@ -97,20 +109,38 @@ def mark_point(snapshot, x, y, directory):
     return tuple(map(str, paths))
 
 
-def prompt(question, item, first, point=None):
-    where = f"\"{item['title']}\" ({item['source']}; saved copy at {item['snapshot']})"
-    if item.get("deck"):
-        where += f", slide {item['page']} of {item['pages']}"
+def prompt(question, item, first, point=None, live=False):
+    if item.get("kind") == "run":  # a live run: the fork reads what Visor has gathered, since the file may be on another machine
+        where = (f"the live run \"{item['title']}\" (its progress file is {item['source']}; the progress, curves and "
+                 f"notes Visor has read from it are saved at {item['dump']})")
+        shown = f"{where}, which you followed with `visor track`"
+    else:
+        where = f"\"{item['title']}\" ({item['source']}; saved copy at {item['snapshot']})"
+        if item.get("deck"):
+            where += f", slide {item['page']} of {item['pages']}"
+        shown = f"the figure {where}, which you showed with `visor show`"
     if point:
         question = (f"[The user pointed at the figure: x={point['x']}, y={point['y']} px of "
                     f"{item['width']}×{item['height']}, origin at the top left ({100 * point['x'] / item['width']:.0f} % "
                     f"of the width, {100 * point['y'] / item['height']:.0f} % of the height). They are asking about the "
                     f"element at or near that point. Use Read to look at the figure with the point circled in red "
                     f"({point['marked']}) and at the zoom around the point ({point['zoom']}).]\n\n{question}")
+    if item.get("agent_provider") == "codex":
+        question = question.replace("Use Read to look at", "Use your image-viewing tool to look at")
+    if live:
+        return (f"[Message sent from Visor to the original session] The user is looking at {shown}. "
+                "Answer in the user's language, briefly and with little Markdown because Visor shows plain text. "
+                "This message belongs to the existing conversation; keep its ongoing work and settings.\n\n"
+                f"{question}")
     if not first:
         return f"[From Visor · the user is looking at {where}]\n\n{question}"
+    if item.get("agent_provider") == "codex":
+        return ("[Figure chat from Visor] This is a separate read-only fork of the original conversation. "
+                f"The user is looking at {shown}. Discuss and explain this figure or run; "
+                "treat earlier tasks as context, not work to continue. Do not edit files or take actions in external services. "
+                "Answer briefly in the user's language with little Markdown.\n\n" + question)
     return ("[Message sent from Visor] This conversation is a fork of your session, opened from the Visor window. "
-            f"The user is looking at the figure {where}, which you showed with `visor show`. In this fork you can only "
+            f"The user is looking at {shown}. In this fork you can only "
             "read and search (Read, Grep, Glob): you cannot edit files or run commands. Answer in the user's language, "
             "briefly and with little Markdown, because the window shows plain text.\n\n"
             f"{question}")

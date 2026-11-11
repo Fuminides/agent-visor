@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from agent_visor import chat
+from agent_visor import chat, mirror, runs
 from agent_visor.cli import default_session
 from agent_visor.storage import Store, page_count, signature
 
@@ -33,6 +34,15 @@ def graphical():
         return True
     except Exception:
         return False
+
+
+def settle(app):
+    """Wait until the figure being read in the background is on the stage."""
+    deadline = time.monotonic() + 10
+    while app.loading and time.monotonic() < deadline:
+        app.root.update()
+        time.sleep(.005)
+    app.root.update()
 
 
 class StorageTests(unittest.TestCase):
@@ -225,6 +235,204 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(default_session(), "custom")
 
 
+class MirrorTests(unittest.TestCase):
+    def test_feed_carries_figures_presentations_and_runs_to_another_store(self):
+        with tempfile.TemporaryDirectory(prefix="av-mirror-") as directory:
+            directory = Path(directory)
+            there, here = Store(directory / "there"), Store(directory / "here")
+            plot, slide = directory / "plot.png", directory / "slide.png"
+            Image.new("RGB", (300, 200), "green").save(plot)
+            Image.new("RGB", (160, 90), "white").save(slide)
+            there.ingest([str(slide), str(slide)], "Study / comparison", "Slides", deck=True)
+            there.ingest([str(plot)], "Study / comparison", "Plot", "It drops.", agent_session="31cde43d-3856-47e7-990f-9d87748f1e6d")
+            log = directory / "run.log"
+            log.write_text("[1/4] loss=0.5\n")
+            there.track(str(log), "Study / comparison", "Training", ["loss"])
+            there.track("peanut:/data/run.log", "Study / comparison", "On a third computer")
+            out = io.StringIO()
+            mirror.feed(there, {}, out, follow=False)
+            lines = [line for line in out.getvalue().splitlines() if line]
+            self.assertEqual([json.loads(line)["kind"] for line in lines], ["figure", "figure", "run"])
+            cursor = {}
+            for line in lines:
+                action, items, at = mirror.receive(here, "box", line)
+                self.assertTrue(items)
+                cursor.update(at)
+            # Filed as its own project, with where it came from; a presentation keeps its slides.
+            figure, second, first = here.history()
+            self.assertEqual({row["session"] for row in here.history()}, {"Study @ box / comparison"})
+            self.assertEqual((figure["title"], figure["caption"], figure["source"]), ("Plot", "It drops.", f"box:{plot}"))
+            self.assertEqual((figure["width"], figure["height"], figure["agent_session"]), (300, 200, None))
+            self.assertTrue(Path(figure["snapshot"]).with_suffix(".thumb.png").is_file())
+            self.assertEqual([(row["title"], row["page"], row["pages"]) for row in here.deck_pages(first["deck"])],
+                             [("Slides", 1, 2), ("Slides", 2, 2)])
+            # The run is followed from here, over ssh; the one on a third computer is left out.
+            self.assertEqual([(run["title"], run["source"], run["metrics"]) for run in here.runs()], [("Training", f"box:{log}", ["loss"])])
+            # A line that arrives twice adds nothing, and the feed continues after what was received.
+            self.assertEqual([mirror.receive(here, "box", line)[1] for line in lines[:2]], [[], []])
+            mirror.receive(here, "box", lines[2])
+            self.assertEqual((len(here.history()), len(here.runs())), (3, 1))
+            there.ingest([str(plot)], "Other", "Later")
+            out = io.StringIO()
+            mirror.feed(there, cursor, out, follow=False)
+            self.assertEqual([json.loads(line)["rows"][0]["title"] for line in out.getvalue().splitlines() if line], ["Later"])
+            # After a long break only the newest entries come, and a presentation is never cut.
+            with patch.object(mirror, "CATCH_UP", 2):
+                out = io.StringIO()
+                mirror.feed(there, {}, out, follow=False)
+            self.assertEqual([json.loads(line)["rows"][0]["title"] for line in out.getvalue().splitlines() if '"figure"' in line], ["Plot", "Later"])
+            # The id names files on this computer, so one that is not an id is refused.
+            entry = json.loads(lines[1])
+            entry["rows"][0]["id"] = "../../outside"
+            with self.assertRaises(ValueError):
+                mirror.receive(here, "box", json.dumps(entry))
+            self.assertEqual(mirror.command("box", {"runs": 3, "images": 7})[-2:], ["box", "~/.local/bin/visor feed --images 7 --runs 3"])
+
+    def test_one_connection_serves_the_feed_and_the_readings_of_its_runs(self):
+        with tempfile.TemporaryDirectory(prefix="av-") as directory, patch.dict(os.environ, {"VISOR_RUNTIME_DIR": directory}):
+            config = subprocess.CompletedProcess([], 0, stdout="hostname box\ncontrolmaster false\n")
+            with patch("agent_visor.mirror.subprocess.run", return_value=config):
+                shared = mirror.sharing("box")
+            self.assertEqual(shared, ["-o", f"ControlPath={directory}/ssh-%C"])
+            # The feed opens the connection (asking through the dialog, so not in batch mode); a run's readings reuse it.
+            feed = mirror.command("box", {}, shared)
+            self.assertEqual(feed[-5:-2], ["ControlMaster=auto", *shared])
+            self.assertNotIn("BatchMode=yes", feed)
+            calls = []
+            with patch.dict(runs.SHARED, {"box": shared}), patch("agent_visor.runs.subprocess.run", side_effect=lambda command, **kwargs: (
+                    calls.append(command), subprocess.CompletedProcess(command, 0, stdout=b"3\nabc", stderr=b""))[1]):
+                self.assertEqual(runs.fetch("box:/data/run.log", 0), (3, b"abc"))
+                runs.fetch("peanut:/data/run.log", 0)
+            self.assertEqual(calls[0][:8], ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *shared, "box"])
+            self.assertEqual(calls[1][:6], ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "peanut"])
+            # A host whose ssh config already shares connections keeps its own way.
+            config.stdout = "hostname box\ncontrolpath /home/me/.ssh/cm-%C\n"
+            with patch("agent_visor.mirror.subprocess.run", return_value=config):
+                self.assertEqual(mirror.sharing("box"), [])
+            script = Path(mirror.askpass())
+            self.assertTrue(os.access(script, os.X_OK))
+            self.assertIn("-m agent_visor _askpass", script.read_text())
+
+
+class RunTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="av-run-")
+        self.directory = Path(self.tmp.name)
+        self.store = Store(self.directory / "data")
+        self.log = self.directory / "run.log"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def follow(self, text, **options):
+        self.log.write_text(text)
+        return runs.advance(self.store, self.store.track(str(self.log), "study", **options)["id"])[0]
+
+    def test_log_lines_tqdm_bars_and_json_become_progress_curves_and_latest_values(self):
+        run = self.follow("starting up\n[1/4] seed=0 acc=0.5 phase=warm\n"
+                          " 50%|█████     | 2/4 [00:10<00:10,  5.0s/it, acc=0.6]\r"
+                          '{"step": 3, "total": 4, "acc": 0.7, "loss": NaN, "best": true}\n[4/4] acc=0.9', metrics=["acc"])
+        data = run["data"]
+        self.assertEqual((data["step"], data["total"], data["lines"]), (3, 4, 3))  # the unfinished last line waits
+        self.assertEqual(data["series"], {"acc": [[1, .5], [2, .6], [3, .7]]})
+        self.assertEqual(data["info"], {"seed": "0", "phase": "warm", "loss": "nan", "best": "True"})
+        self.assertEqual(run["offset"], len(self.log.read_bytes()) - len("[4/4] acc=0.9"))
+        self.assertEqual(runs.state(run), "running")
+        with self.log.open("a") as handle:
+            handle.write("\n")
+        run, changed = runs.advance(self.store, run["id"])
+        self.assertTrue(changed)
+        self.assertEqual((run["data"]["step"], runs.state(run)), (4, "done"))
+        self.assertEqual(runs.advance(self.store, run["id"])[1], False)
+        # Without a choice every number is a curve; a file with nothing readable keeps waiting.
+        self.assertEqual(set(self.follow("[1/2] a=1 b=2 c=x\n", metrics=[])["data"]["series"]), {"a", "b"})
+        other = self.store.track(str(self.directory / "data/visor.log"), "study")
+        (self.directory / "data/visor.log").write_text("nothing here\n{broken\n[1, 2]\n")
+        self.assertEqual(runs.state(runs.advance(self.store, other["id"])[0]), "waiting")
+
+    def test_time_left_comes_from_the_pace_seen_while_following(self):
+        run = self.follow("".join(f"[{k}/10] loss=1\n" for k in range(1, 5)))
+        self.assertEqual(run["data"]["seen"], [])  # what the file already held says nothing about the pace
+        self.assertIsNone(runs.remaining(run["data"]))
+        for step, moment in ((5, 1000.0), (6, 1010.0), (7, 1020.0)):
+            with self.log.open("a") as handle:
+                handle.write(f"[{step}/10] loss=1\n")
+            with patch("agent_visor.runs.time.time", return_value=moment):
+                run, _ = runs.advance(self.store, run["id"])
+        self.assertEqual(run["data"]["seen"], [[1000.0, 5], [1010.0, 6], [1020.0, 7]])
+        self.assertEqual(runs.remaining(run["data"], 1020.0), 30)  # 3 steps left at 10 s each
+        self.assertEqual(runs.remaining(run["data"], 1025.0), 25)
+        self.assertEqual(runs.remaining(run["data"], 9999.0), 0)
+
+    def test_relaunch_into_the_same_file_is_a_new_entry_and_notes_stay_with_their_run(self):
+        first = self.follow("[1/3] acc=0.1\n[2/3] acc=0.2\n", title="Sweep")
+        self.assertEqual(self.store.track(str(self.log), "study")["id"], first["id"])
+        self.store.add_note(first["id"], "first try")
+        self.log.write_text("[1/9] acc=0.4\n")
+        second, changed = runs.advance(self.store, first["id"])
+        self.assertTrue(changed)
+        self.assertNotEqual(second["id"], first["id"])
+        self.assertEqual((second["title"], second["data"]["total"], second["notes"]), ("Sweep", 9, []))
+        kept = self.store.run(first["id"])
+        self.assertEqual((kept["closed"], kept["data"]["step"], kept["notes"][0][1]), (1, 2, "first try"))
+        self.assertEqual(self.store.track(str(self.log), "study")["id"], second["id"])
+        self.assertEqual([run["id"] for run in self.store.runs("study")], [second["id"], first["id"]])
+        self.assertEqual([run["id"] for run in self.store.runs(following=True)], [second["id"]])
+        for index in range(25):
+            self.store.add_note(second["id"], f"note {index}")
+        self.assertEqual([note for _, note in self.store.run(second["id"])["notes"]][::19], ["note 5", "note 24"])
+        # A conversation that only holds runs is listed too, and runs count as its entries.
+        Image.new("RGB", (20, 20), "red").save(self.directory / "a.png")
+        self.store.ingest([str(self.directory / "a.png")], "figures")
+        self.assertEqual({row["session"]: (row["entries"], row["snapshot"] is None) for row in self.store.sessions()},
+                         {"study": (2, True), "figures": (1, False)})
+        with self.assertRaises(ValueError):
+            self.store.track(str(self.log), " ")
+
+    def test_finished_silent_and_unreadable_runs(self):
+        run = self.follow("[2/2] acc=1\n")
+        self.assertEqual((runs.state(run), run["closed"]), ("done", 0))  # lines after the last step are still read
+        self.store.save_run(run["id"], updated=time.time() - runs.DONE_GRACE - 1)
+        self.assertEqual(runs.advance(self.store, run["id"])[0]["closed"], 1)
+        slow = self.directory / "slow.log"
+        slow.write_text("[1/5] acc=1\n")
+        run = runs.advance(self.store, self.store.track(str(slow), "study")["id"])[0]
+        self.store.save_run(run["id"], updated=time.time() - 3600)
+        self.assertEqual(runs.advance(self.store, run["id"])[0]["closed"], 0)
+        slow.unlink()
+        run, changed = runs.advance(self.store, run["id"])
+        self.assertEqual((changed, runs.state(run)), (True, "error"))
+        self.assertIn("File not found", run["error"])
+        self.store.save_run(run["id"], updated=time.time() - runs.QUIET_LIMIT - 1)
+        run = runs.advance(self.store, run["id"])[0]
+        self.assertEqual(run["closed"], 1)
+        self.assertEqual(self.store.track(str(slow), "study")["closed"], 0)  # asking again follows it again
+        self.assertEqual(runs.advance(self.store, "missing"), (None, False))
+
+    def test_a_file_on_another_machine_is_read_over_ssh_without_prompts(self):
+        calls = []
+
+        def ssh(args, **options):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, b"30\n[3/12] acc=0.5\n", b"")
+        with patch("agent_visor.runs.subprocess.run", ssh):
+            self.assertEqual(runs.fetch("peanut:/data/it's a run.log", 12), (30, b"[3/12] acc=0.5\n"))
+        self.assertEqual(calls[0][:6], ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "peanut"])
+        self.assertIn("tail -c +13 -- '/data/it'\"'\"'s a run.log'", calls[0][6])
+        failed = subprocess.CompletedProcess([], 255, b"", b"warning\nssh: connect to host peanut port 22: Connection timed out\n")
+        with patch("agent_visor.runs.subprocess.run", return_value=failed):
+            with self.assertRaisesRegex(OSError, "Connection timed out"):
+                runs.fetch("peanut:/data/run.log", 0)
+        with patch("agent_visor.runs.subprocess.run", side_effect=subprocess.TimeoutExpired("ssh", 40)):
+            with self.assertRaisesRegex(OSError, "No answer from peanut"):
+                runs.fetch("peanut:/data/run.log", 0)
+        # Only a plain host name is taken as a machine: nothing that ssh would read as an option.
+        with patch("agent_visor.runs.subprocess.run", side_effect=AssertionError("ssh must not run")):
+            for source in ("-oProxyCommand=x:/tmp/a", "peanut:relative.log", "C:\\run.log"):
+                with self.assertRaisesRegex(OSError, "File not found"):
+                    runs.fetch(source, 0)
+
+
 class IconTests(unittest.TestCase):
     def test_mark_is_antialiased_without_a_halo(self):
         from agent_visor.app import ACCENT, BG, visor_mark
@@ -237,8 +445,8 @@ class IconTests(unittest.TestCase):
         darkest = min(colours, key=sum)
         self.assertGreaterEqual(sum(darkest), sum(mark.getpixel((20, 6))))  # nothing darker than the disc: no ringing halo
         self.assertEqual("#%02x%02x%02x" % background, BG)
-        icon = visor_mark(256, ACCENT, BG, square=True)
-        self.assertEqual(icon.getpixel((0, 0))[3], 0)  # transparent outside the rounded square
+        icon = visor_mark(256, ACCENT, BG)
+        self.assertEqual(icon.getpixel((0, 0))[3], 0)  # the app icon is transparent outside the disc
 
     def test_every_theme_keeps_text_and_focus_readable(self):
         from agent_visor.app import THEMES, SWATCHES
@@ -287,6 +495,15 @@ class ChatTests(unittest.TestCase):
             self.assertEqual(args[args.index("--tools") + 1], "Read,Grep,Glob")
             self.assertIn("--strict-mcp-config", args)
             self.assertEqual(args[-1], args[-1].strip())
+
+    def test_a_run_is_described_to_the_fork_by_what_visor_read(self):
+        run = {"kind": "run", "title": "PPO", "source": "peanut:/data/run.log", "dump": "/data/runs/abc.json"}
+        for first in (True, False):
+            text = chat.prompt("How is it going?", run, first)
+            self.assertIn("peanut:/data/run.log", text)
+            self.assertIn("/data/runs/abc.json", text)
+            self.assertTrue(text.endswith("How is it going?"))
+        self.assertIn("visor track", chat.prompt("?", run, True))
 
     def test_point_is_marked_for_the_fork(self):
         with tempfile.TemporaryDirectory(prefix="av-point-") as directory:
@@ -425,6 +642,35 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.assertFalse(self.cli("status", "--json")["running"])
         self.assertEqual(self.cli("history", "--json")["items"], [])
 
+    def test_track_follows_a_file_and_says_what_it_understood(self):
+        log = self.directory / "train ñ.log"
+        missing = self.cli("track", self.directory / "nothing.log", "--json", check=False)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("File not found", missing.stderr)
+        self.assertFalse(self.cli("status", "--json")["running"])
+        log.write_text("[1/4] reward=10.5 loss=0.9 seed=3\n")
+        first = self.cli("track", log, "--title", "PPO ñ", "--metrics", "reward,loss", "--note", "Baseline", "--session", "RL", "--json")
+        self.assertEqual((first["step"], first["total"], first["metrics"], first["info"], first["error"]),
+                         (1, 4, ["reward", "loss"], ["seed"], None))
+        self.assertEqual((first["session"], first["queued"], first["current_id"]), ("RL", False, first["run_id"]))
+        store = Store(self.directory / "data")
+        with log.open("a") as handle:
+            handle.write("[2/4] reward=12 loss=0.7 seed=3\n")
+        self.wait_for(lambda: store.run(first["run_id"])["data"]["step"] == 2)  # read by the window on its own
+        again = self.cli("track", log, "--note", "Second note", "--session", "RL", "--json")
+        self.assertEqual((again["run_id"], again["pid"], again["step"]), (first["run_id"], first["pid"], 2))
+        self.assertEqual([note for _, note in store.run(first["run_id"])["notes"]], ["Baseline", "Second note"])
+        self.assertIn("step 2/4", self.cli("track", log, "--session", "RL", check=False).stdout)
+        empty = self.directory / "empty.log"
+        empty.write_text("")
+        self.assertIn("no progress line yet", self.cli("track", empty, "--session", "RL", check=False).stdout)
+        self.cli("stop", "--json")
+        self.wait_for(lambda: not (self.directory / "run/visor.sock").exists())
+        with log.open("a") as handle:
+            handle.write("[3/4] reward=13 loss=0.6 seed=3\n")
+        self.cli("open", "--json")  # an open run is followed again when the window comes back
+        self.wait_for(lambda: store.run(first["run_id"])["data"]["step"] == 3)
+
     def test_stale_socket_recovers_after_forced_exit(self):
         state = self.cli("show", self.source, "--session", "Recovery", "--json")
         os.kill(state["pid"], signal.SIGTERM)
@@ -457,6 +703,7 @@ class WindowBehaviorTests(unittest.TestCase):
                 self.assertTrue(app.new_button.winfo_ismapped())
                 app.show_latest()
                 self.assertEqual(app.current["id"], newer[0]["id"])
+                settle(app)
                 app.zoom(10000)
                 self.assertEqual(app.scale, 8)
                 self.assertLessEqual(app.photo.width(), app.canvas.winfo_width() + 16)
@@ -464,6 +711,235 @@ class WindowBehaviorTests(unittest.TestCase):
                 self.assertEqual(app.scale, .02)
                 app.set_fit()
                 self.assertTrue(app.fit)
+            finally:
+                root.destroy()
+
+    def test_followed_computer_shows_its_figures_here_and_continues_after_a_break(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            directory = Path(directory)
+            image = directory / "plot.png"
+            Image.new("RGB", (300, 200), "green").save(image)
+            there, store = Store(directory / "there"), Store(directory / "data")
+            there.ingest([str(image)], "Study", "First")
+
+            # The other computer is a second history on this one: the same feed, without ssh in between.
+            def local(host, cursor, shared=()):
+                return [sys.executable, "-m", "agent_visor", "feed", *(part for key, value in cursor.items() for part in (f"--{key}", str(value)))]
+
+            def until(condition):
+                deadline = time.monotonic() + 20
+                while not condition() and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(.02)
+                self.assertTrue(condition())
+            root = tk.Tk()
+            try:
+                with patch.object(mirror, "command", local), patch.object(mirror, "RETRY", 1), \
+                        patch.dict(os.environ, {"VISOR_DATA_DIR": str(directory / "there"), "PYTHONPATH": str(ROOT)}):
+                    app = Visor(root, store)
+                    self.assertEqual(app.dispatch({"action": "follow", "host": "box"})["mirrors"], {"box": "connecting"})
+                    until(lambda: app.current and app.current["title"] == "First")
+                    self.assertEqual((app.session, app.dispatch({"action": "status"})["mirrors"]), ("Study @ box", {"box": "connected"}))
+                    there.ingest([str(image)], "Study", "Second")
+                    until(lambda: app.current["title"] == "Second")
+                    # The connection drops: it comes back by itself and brings only what is new.
+                    app.feeds["box"].kill()
+                    there.ingest([str(image)], "Study", "Third")
+                    until(lambda: app.current["title"] == "Third")
+                    self.assertEqual([item["title"] for item in store.history()], ["Third", "Second", "First"])
+                    self.assertEqual(store.setting("mirrors"), ["box"])  # followed again the next time the window opens
+                    app.dispatch({"action": "follow", "host": "box", "off": True})
+                    until(lambda: app.feeds["box"].poll() is not None)
+                    self.assertEqual((app.mirrors, store.setting("mirrors")), ({}, []))
+                    # A password that was asked for and did not connect is not asked again every few seconds.
+                    attempts = []
+
+                    def refused(host, cursor, shared=()):
+                        attempts.append(host)
+                        return ["sh", "-c", f"echo '{mirror.ASKED}' >&2; echo 'Permission denied (publickey,password).' >&2; exit 255"]
+                    with patch.object(mirror, "command", refused):
+                        app.dispatch({"action": "follow", "host": "box"})
+                        until(lambda: app.mirrors["box"].get("paused"))
+                        time.sleep(1.5)  # longer than the pause before another try
+                        self.assertEqual(attempts, ["box"])
+                        self.assertEqual(app.dispatch({"action": "status"})["mirrors"]["box"],
+                                         "Permission denied (publickey,password). (run `visor follow box` to try again)")
+                    there.ingest([str(image)], "Study", "Fourth")
+                    app.dispatch({"action": "follow", "host": "box"})  # the user says to try again
+                    until(lambda: app.current["title"] == "Fourth")
+                    app.dispatch({"action": "follow", "host": "box", "off": True})
+                    until(lambda: app.feeds["box"].poll() is not None)
+            finally:
+                root.destroy()
+
+    def test_ssh_asks_through_a_dialog(self):
+        import tkinter as tk
+        from agent_visor.askpass import Dialog
+        root = tk.Tk()
+        try:
+            dialog = Dialog(root, "javier@box's password: ", language="es")
+            root.update()
+            self.assertEqual(dialog.entry.cget("show"), "•")  # what is typed is not shown
+            self.assertEqual(dialog.accept_button.cget("text"), "Conectar")
+            dialog.entry.insert(0, "secret")
+            dialog.accept()
+            self.assertEqual(dialog.answer, "secret")
+            for child in root.winfo_children():
+                child.destroy()
+            # A computer never seen before: ssh wants "yes" typed; the dialog offers it as a button.
+            dialog = Dialog(root, "The authenticity of host 'box' can't be established.\nAre you sure you want to continue connecting (yes/no/[fingerprint])?")
+            root.update()
+            self.assertIsNone(dialog.entry)
+            self.assertEqual(dialog.accept_button.cget("text"), "Yes")
+            dialog.accept()
+            self.assertEqual(dialog.answer, "yes")
+            for child in root.winfo_children():
+                child.destroy()
+            dialog = Dialog(root, "Password: ")
+            dialog.cancel()
+            self.assertIsNone(dialog.answer)  # cancelling answers nothing: ssh gives up
+        finally:
+            root.destroy()
+
+    def test_figure_is_read_in_the_background_and_the_last_choice_wins(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            wide, tall = Path(directory) / "wide.png", Path(directory) / "tall.png"
+            Image.new("RGB", (1200, 300), "green").save(wide)
+            Image.new("RGB", (300, 1200), "blue").save(tall)
+            store = Store(Path(directory) / "data")
+            store.ingest([str(wide)], "One")
+            store.ingest([str(tall)], "One")
+            root = tk.Tk()
+            try:
+                app = Visor(root, store)
+                settle(app)
+                self.assertEqual(app.original.size, (300, 1200))
+                older, newer = app.items[1], app.items[0]
+                app.select(older)
+                app.select(newer)
+                app.select(older)  # chosen one after another, before any of them is read
+                self.assertTrue(app.loading)  # select returns without waiting for the figure
+                self.assertIsNone(app.original)
+                self.assertEqual(app.title_label.cget("text"), "wide")
+                settle(app)
+                self.assertEqual(app.original.size, (1200, 300))
+                self.assertEqual(app.photo.width(), round(1200 * app.scale))
+                self.assertTrue(app.zoom_bar.winfo_ismapped())
+                # The figure arrives already scaled for the stage, and the same view is not scaled again.
+                scaled = app.scaled[1]
+                app.draw()
+                self.assertIs(app.scaled[1], scaled)
+                app.zoom(2)
+                self.assertIsNot(app.scaled[1], scaled)
+                # A snapshot that cannot be read leaves the stage empty instead of waiting for ever.
+                Path(newer["snapshot"]).unlink()
+                app.select(newer)
+                settle(app)
+                self.assertIsNone(app.loading)
+                self.assertIsNone(app.original)
+            finally:
+                root.destroy()
+
+    def test_live_run_page_updates_scrolls_and_sits_in_the_history(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            directory = Path(directory)
+            image = directory / "plot.png"
+            Image.new("RGB", (300, 200), "white").save(image)
+            log = directory / "run.log"
+            log.write_text("".join(f"[{k}/40] reward={k * 2.5} loss={1 / k:.3f} lr=0.001 a=1 b=2 c=3 d=4 phase=train\n" for k in range(1, 11)))
+            store = Store(directory / "data")
+            figure = store.ingest([str(image)], "RL")[0]
+            root = tk.Tk()
+            try:
+                app = Visor(root, store)
+                root.geometry("1000x640")
+                root.update()
+                # The test reads the file itself, so the reader thread is given nothing to do (figures still load in theirs).
+                reader = patch.object(app, "run_worker")
+                reader.start()
+                self.addCleanup(reader.stop)
+                run = runs.advance(store, store.track(str(log), "RL", "PPO run", agent_session="31cde43d-3856-47e7-990f-9d87748f1e6d")["id"])[0]
+                store.add_note(run["id"], "Looks stable so far.")
+                response = app.dispatch({"action": "track", "items": [store.run(run["id"])]})
+                root.update()
+                self.assertFalse(response["queued"])
+                self.assertEqual((app.current["id"], [item["id"] for item in app.items]), (run["id"], [run["id"], figure["id"]]))
+                self.assertIn(run["id"], app.following)
+                app.draw()
+                shown = [app.canvas.itemcget(item, "text") for item in app.canvas.find_all() if app.canvas.type(item) == "text"]
+                for expected in ("Running", "25 %", "10 / 40", "reward", "25", "Looks stable so far.", "Estimating the time left…"):
+                    self.assertIn(expected, shown)
+                self.assertEqual(len(app.run_plots), 7)
+                self.assertFalse(app.zoom_bar.winfo_ismapped())
+                self.assertEqual(app.title_label.cget("text"), "PPO run")
+                row = app.cards[run["id"]]
+                self.assertEqual(row.meta.cget("text"), "25 %")
+                # A new line reaches the row and the page without rebuilding the list.
+                with log.open("a") as handle:
+                    handle.write("[20/40] reward=80 loss=0.01\n")
+                changed = runs.advance(store, run["id"])[0]
+                app.dispatch({"action": "run", "id": run["id"]})
+                app.draw()
+                self.assertIs(app.cards[run["id"]], row)
+                self.assertTrue(row.meta.cget("text").startswith("50 %"))
+                self.assertEqual(app.current["data"]["step"], 20)
+                # Pointing at a curve shows the value of its nearest point; the wheel scrolls the page within its length.
+                chart = app.run_plots[0]
+                where = type("Event", (), {"x": round(chart["across"](10)), "y": round(chart["plot"][1] + 5)})()
+                app.point_at(where)
+                self.assertIn("25  @  10", [app.canvas.itemcget(item, "text") for item in app.canvas.find_withtag("hover")
+                                           if app.canvas.type(item) == "text"])
+                app.point_at(None)
+                self.assertFalse(app.canvas.find_withtag("hover"))
+                self.assertGreater(app.run_height, app.canvas.winfo_height())
+                for _ in range(40):
+                    app.wheel(.9, None)
+                self.assertEqual(app.run_scroll, app.run_height - app.canvas.winfo_height())
+                for _ in range(40):
+                    app.wheel(1.1, None)
+                self.assertEqual(app.run_scroll, 0)
+                # It lives in the history with the figures, in every theme and language, and has its own questions.
+                app.set_theme("dark")
+                app.set_language("es")
+                root.update()
+                self.assertEqual(app.current["id"], run["id"])
+                self.assertIn("EN VIVO", [w.cget("text") for w in app.cards[run["id"]].winfo_children()[1].winfo_children()][-1])
+                app.toggle_chat()
+                root.update()
+                self.assertEqual(str(app.send_button.cget("state")), "normal")
+                self.assertIn("ejecución", app.chat_log.get("1.0", "end"))
+                app.step(1)
+                settle(app)
+                self.assertEqual(app.current["id"], figure["id"])
+                self.assertTrue(app.zoom_bar.winfo_ismapped())
+                app.watch()
+                app.step(-1)
+                self.assertEqual(app.current["id"], run["id"])
+                # Finished: the row says so; a relaunch into the same file takes its place on screen.
+                with log.open("a") as handle:
+                    handle.write("[40/40] reward=100 loss=0.001\n")
+                runs.advance(store, run["id"])
+                app.dispatch({"action": "run", "id": run["id"]})
+                self.assertTrue(app.cards[run["id"]].meta.cget("text").startswith("Terminado"))
+                log.write_text("[1/8] reward=1\n")
+                relaunched = runs.advance(store, run["id"])[0]
+                app.dispatch({"action": "run", "id": relaunched["id"]})
+                root.update()
+                self.assertEqual((app.current["id"], len(app.items)), (relaunched["id"], 3))
+                app.dispatch({"action": "run_end", "id": relaunched["id"], "started": run["id"], "failed": True})
+                self.assertNotIn(run["id"], app.following)
+                # A conversation that only holds a run appears in the browser without a thumbnail.
+                only = store.track(str(log), "Only runs")
+                app.dispatch({"action": "track", "items": [only]})
+                app.toggle_browser()
+                root.update()
+                self.assertEqual({session for session, _ in app.browser_rows}, {"RL", "Only runs"})
             finally:
                 root.destroy()
 
@@ -836,7 +1312,7 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                     app.set_language(language)
                     for _ in range(9):
                         app.turn(1)  # "Slide 10 / 12" is the widest label
-                    root.update()
+                    settle(app)
                     row = app.zoom_bar.master
                     for bar in (app.slide_bar, app.zoom_bar):
                         for child in bar.winfo_children():
@@ -955,6 +1431,22 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 module.install(home, sys.executable)
             self.assertIn("another app", command.read_text())
+
+    @unittest.skipUnless(graphical(), "No graphical desktop access")
+    def test_shortcut_names_the_class_tk_gives_the_window(self):
+        # GNOME puts the shortcut's icon on the window only when StartupWMClass is the window's class, letter for letter.
+        import tkinter as tk
+        name = re.search(r'tk\.Tk\(className="(\w+)"\)', (ROOT / "agent_visor/app.py").read_text()).group(1)
+        root = tk.Tk(className=name)
+        window_class = root.winfo_class()
+        root.destroy()
+        spec = importlib.util.spec_from_file_location("visor_install", ROOT / "install.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(prefix="av-install-") as directory:
+            module.install(Path(directory), sys.executable)
+            shortcut = (Path(directory) / ".local/share/applications/agent-visor.desktop").read_text()
+        self.assertIn(f"StartupWMClass={window_class}\n", shortcut)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ def install(home, interpreter, desktop=True):
                 value = value.replace(char, '\\' + char)
             return '"' + value + '"'
         shortcut.write_text("[Desktop Entry]\nType=Application\nName=Visor\nComment=Your visual workspace for terminal agents\n"
-            f"Exec={quoted(str(command))} open\nIcon={ROOT / 'assets/visor.svg'}\nTerminal=false\nCategories=Graphics;Utility;\nStartupWMClass=AgentVisor\n")
+            f"Exec={quoted(str(command))} open\nIcon={ROOT / 'assets/visor.svg'}\nTerminal=false\nCategories=Graphics;Utility;\nStartupWMClass=Agentvisor\n")
     print(f"Command installed: {command}")
     print("Skill installed for Codex and Claude Code (available in new sessions).")
     print(f"Try: {command} demo")
