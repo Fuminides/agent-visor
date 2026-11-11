@@ -2,6 +2,8 @@
 
 A local window where terminal coding agents such as Claude Code and Codex show you images, plots and presentations, and where you can watch a training or evaluation while it runs. The `visor` command opens the window when it is needed and reuses it when it is already open. You can also ask the agent session that made a figure about it, right from the window.
 
+![An agent shows two figures, a training is followed live, and a region of a figure is framed to ask about it](assets/readme/visor.gif)
+
 ## Usage
 
 ```bash
@@ -28,6 +30,8 @@ If you regenerate the PDF (or any file of the presentation) while **Follow lates
 ## Live runs
 
 `visor track FILE` follows the file a training or evaluation writes its progress to, and adds the run to the history as a live entry. Its page shows how far the run is, the time left and when it should end, one chart per metric, the latest value of anything else the lines report, and the notes the agent leaves. The window reads the file by itself, every 2 seconds, so the page keeps moving for hours with no agent awake.
+
+![The page of a live run: 70 % done, 21 minutes left, a chart for the reward and one for the loss, and the agent's note](assets/readme/live-run.png)
 
 ```bash
 nohup python -u train.py > run.log 2>&1 &
@@ -71,11 +75,15 @@ Visor records `CODEX_THREAD_ID` (or `CODEX_SESSION_ID`) and the local control so
 
 Right-click a figure to mark a point, or hold the right button and drag to frame a region. The next question includes the coordinates, a saved copy of that exact figure version with the point circled or the region framed, and a zoom of it. Slides also include the selected page number. **Copy command** copies a terminal command for the connected Codex thread or the Claude fork. Each entry keeps its question history.
 
+![A bar of a chart framed in red, and the question about it being typed in the Ask panel](assets/readme/ask-region.png)
+
 Older Codex entries have no recorded session; show the image or track the run again from its original session to connect it. Images opened by hand have no session to ask.
 
 ## Projects and conversations
 
 The button at the top of the sidebar names the project being shown. Click it to browse every conversation Visor has stored, grouped by project and most recently used first, each with its latest image, how many figures it holds and when it last changed. Type to filter by any part of the name, move with the up/down arrows, press `Enter` to open one and `Esc` to go back.
+
+![The list of conversations grouped by project, here in the sky theme](assets/readme/conversations.png)
 
 A conversation is one `--session` value, or one folder. `--session "Study / comparison"` is the conversation "comparison" of the project "Study". A folder is filed under its git repository, so a subfolder or a linked worktree (`git worktree`) appears as a conversation of the main repository's project, next to that project's named conversations.
 
