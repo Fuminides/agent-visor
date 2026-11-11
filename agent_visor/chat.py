@@ -86,10 +86,40 @@ def ring(draw, x, y, radius, width):
     draw.ellipse(box, outline=RED, width=width)
 
 
-def mark_point(snapshot, x, y, directory):
-    """Save the figure with the point circled and a zoom around it, for the fork to look at."""
+def frame(draw, box, width):
+    """Red rectangle with a white halo, like the ring."""
+    draw.rectangle((box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2), outline="white", width=width + 4)
+    draw.rectangle(box, outline=RED, width=width)
+
+
+def saved(directory, marked, zoom):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    name = uuid.uuid4().hex
+    paths = directory / f"{name}.png", directory / f"{name}.zoom.png"
+    marked.save(paths[0])
+    zoom.save(paths[1])
+    return tuple(map(str, paths))
+
+
+def mark_region(snapshot, box, directory):
+    """Save the figure with the region (left, top, right, bottom) framed and a zoom of it, for the fork to look at."""
+    with Image.open(snapshot) as source:
+        image = source.convert("RGB")
+    marked = image.copy()
+    frame(ImageDraw.Draw(marked), box, max(3, round(max(image.size) * .004)))
+    margin = max(12, round(max(box[2] - box[0], box[3] - box[1]) * .06))  # a little of what surrounds it
+    crop = (max(0, box[0] - margin), max(0, box[1] - margin), min(image.width, box[2] + margin), min(image.height, box[3] + margin))
+    factor = max(1, 768 / max(crop[2] - crop[0], crop[3] - crop[1]))
+    zoom = image.crop(crop)
+    zoom = zoom.resize((round(zoom.width * factor), round(zoom.height * factor)), Image.Resampling.LANCZOS)
+    frame(ImageDraw.Draw(zoom), tuple(round((value - crop[index % 2]) * factor) for index, value in enumerate(box)), 3)
+    image.close()
+    return saved(directory, marked, zoom)
+
+
+def mark_point(snapshot, x, y, directory):
+    """Save the figure with the point circled and a zoom around it, for the fork to look at."""
     with Image.open(snapshot) as source:
         image = source.convert("RGB")
     side = max(image.size)
@@ -101,12 +131,8 @@ def mark_point(snapshot, x, y, directory):
     zoom = image.crop(box)
     zoom = zoom.resize((round(zoom.width * factor), round(zoom.height * factor)), Image.Resampling.LANCZOS)
     ring(ImageDraw.Draw(zoom), (x - box[0]) * factor, (y - box[1]) * factor, 22, 4)
-    name = uuid.uuid4().hex
-    paths = directory / f"{name}.png", directory / f"{name}.zoom.png"
-    marked.save(paths[0])
-    zoom.save(paths[1])
     image.close()
-    return tuple(map(str, paths))
+    return saved(directory, marked, zoom)
 
 
 def prompt(question, item, first, point=None, live=False):
@@ -119,7 +145,15 @@ def prompt(question, item, first, point=None, live=False):
         if item.get("deck"):
             where += f", slide {item['page']} of {item['pages']}"
         shown = f"the figure {where}, which you showed with `visor show`"
-    if point:
+    if point and "box" in point:
+        left, top, right, bottom = point["box"]
+        question = (f"[The user framed a region of the figure: from x={left}, y={top} to x={right}, y={bottom} px of "
+                    f"{item['width']}×{item['height']}, origin at the top left ({100 * left / item['width']:.0f} to "
+                    f"{100 * right / item['width']:.0f} % of the width, {100 * top / item['height']:.0f} to "
+                    f"{100 * bottom / item['height']:.0f} % of the height). They are asking about what is inside that "
+                    f"rectangle. Use Read to look at the figure with the region framed in red ({point['marked']}) and "
+                    f"at the zoom of the region ({point['zoom']}).]\n\n{question}")
+    elif point:
         question = (f"[The user pointed at the figure: x={point['x']}, y={point['y']} px of "
                     f"{item['width']}×{item['height']}, origin at the top left ({100 * point['x'] / item['width']:.0f} % "
                     f"of the width, {100 * point['y'] / item['height']:.0f} % of the height). They are asking about the "

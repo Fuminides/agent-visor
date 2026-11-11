@@ -191,7 +191,8 @@ class Visor:
         self.thread = None
         self.chat_key = None
         self.chat_drafts = {}
-        self.point = None
+        self.point = None  # what the user marked to ask about: a point (x, y) or a region (left, top, right, bottom), in image pixels
+        self.mark_from = None
         self.image_origin = (0, 0)
         self.runs = {}
         self.following = set()
@@ -462,6 +463,8 @@ class Visor:
         self.canvas.bind("<B1-Motion>", self.pan_move)
         self.canvas.bind("<Double-Button-1>", lambda event: self.set_fit())
         self.canvas.bind("<Button-3>", self.mark)
+        self.canvas.bind("<B3-Motion>", self.mark_drag)
+        self.canvas.bind("<ButtonRelease-3>", self.mark_end)
         controls = tk.Frame(main, bg=BG)
         self.slide_bar = tk.Frame(controls, bg=BG)
         # The bottom row must fit beside the question panel at the narrowest window: compact buttons, labels sized to text.
@@ -1035,12 +1038,23 @@ class Visor:
                 self.scaled = (box, size), self.original.crop(box).resize(size, Image.Resampling.LANCZOS, reducing_gap=2.0)
             self.photo = ImageTk.PhotoImage(self.scaled[1])
             canvas.create_image(left + box[0] * self.scale, top + box[1] * self.scale, image=self.photo, anchor="nw")
-        if self.point:
-            x, y = left + self.point[0] * self.scale, top + self.point[1] * self.scale
-            r = self.px(11)
-            canvas.create_oval(x - r, y - r, x + r, y + r, outline="white", width=self.px(6), tags="marker")
-            canvas.create_oval(x - r, y - r, x + r, y + r, outline="#e5484d", width=self.px(3), tags="marker")
+        self.draw_marker()
         self.zoom_label.configure(text=f"{round(self.scale * 100)} %")
+
+    def draw_marker(self):
+        """What the user marked, over the figure: a ring on a point, a frame around a region."""
+        canvas, (left, top) = self.canvas, self.image_origin
+        canvas.delete("marker")
+        if not self.point:
+            return
+        spots = [(left + x * self.scale, top + y * self.scale) for x, y in zip(self.point[::2], self.point[1::2])]
+        if len(spots) == 1:
+            r = self.px(11)
+            box, shape = (spots[0][0] - r, spots[0][1] - r, spots[0][0] + r, spots[0][1] + r), canvas.create_oval
+        else:
+            box, shape = (*spots[0], *spots[1]), canvas.create_rectangle
+        shape(*box, outline="white", width=self.px(6), tags="marker")
+        shape(*box, outline="#e5484d", width=self.px(3), tags="marker")
 
     def clock(self, moment):
         date = datetime.fromtimestamp(moment)
@@ -1444,26 +1458,58 @@ class Visor:
         finally:
             self.root.after(900, self.watch)
 
-    def mark(self, event):
-        """Right click: point at an element of the figure to ask about it."""
-        if not self.original:
-            return
+    def spot(self, event):
+        """The image pixel under the pointer, kept inside the image."""
         x = (event.x - self.image_origin[0]) / self.scale
         y = (event.y - self.image_origin[1]) / self.scale
+        return (min(max(int(x), 0), self.original.width - 1), min(max(int(y), 0), self.original.height - 1)), (x, y)
+
+    def mark(self, event):
+        """Right button: point at an element of the figure to ask about it; dragging frames a region instead."""
+        self.mark_from = None
+        if not self.original:
+            return
+        point, (x, y) = self.spot(event)
         if not (0 <= x < self.original.width and 0 <= y < self.original.height):
             return
+        if not self.current.get("agent_session"):
+            if not self.chat_open:
+                self.toggle_chat()  # the panel says why this figure cannot be asked about
+            return
+        self.mark_from = (event.x, event.y)
+        self.point = point
+        self.show_point()
+        self.draw_marker()
+
+    def mark_drag(self, event):
+        if self.mark_from and self.original:
+            # A hand that trembles while clicking still marks a point.
+            if len(self.point) == 4 or max(abs(event.x - self.mark_from[0]), abs(event.y - self.mark_from[1])) >= self.px(6):
+                self.point = (*self.point[:2], *self.spot(event)[0])
+                self.show_point()
+                self.draw_marker()
+
+    def mark_end(self, event):
+        if not self.mark_from:
+            return
+        self.mark_from = None
+        if self.point and len(self.point) == 4:
+            (x0, x1), (y0, y1) = sorted(self.point[::2]), sorted(self.point[1::2])
+            self.point = (x0, y0, x1, y1) if x1 > x0 and y1 > y0 else (x0, y0)
+            self.show_point()
+        # The panel opens once the mark is made: opening it earlier would move the figure under the pointer.
         if not self.chat_open:
             self.toggle_chat()
-        if not self.current.get("agent_session"):
-            return
-        self.point = (int(x), int(y))
-        self.show_point()
-        self.draw()
+        self.draw_marker()
         self.chat_input.focus_set()
 
     def show_point(self):
         if self.point:
-            self.point_label.configure(text=self.t("point", x=self.point[0], y=self.point[1]))
+            if len(self.point) == 4:
+                (x0, x1), (y0, y1) = sorted(self.point[::2]), sorted(self.point[1::2])
+                self.point_label.configure(text=self.t("region", width=x1 - x0, height=y1 - y0, x=x0, y=y0))
+            else:
+                self.point_label.configure(text=self.t("point", x=self.point[0], y=self.point[1]))
             self.point_bar.pack(fill="x", pady=(0, 6), before=self.composer_ring)
         else:
             self.point_bar.pack_forget()
@@ -1641,14 +1687,19 @@ class Visor:
             self.chat_log.configure(state="disabled")
         self.chat_input.delete("1.0", "end")
         point, self.point = self.point, None
-        shown = f"◉ ({point[0]}, {point[1]})  {question}" if point else question
+        region = bool(point) and len(point) == 4
+        shown = (f"▭ ({point[0]}, {point[1]})–({point[2]}, {point[3]})  {question}" if region else
+                 f"◉ ({point[0]}, {point[1]})  {question}" if point else question)
         self.store.add_message(thread["id"], "user", shown)
         self.append_chat("user", shown)
         if point:
             self.show_point()
             self.draw()
         try:
-            if point:
+            if region:
+                marked, zoom = chat.mark_region(item["snapshot"], point, self.store.directory / "points")
+                point = dict(box=point, marked=marked, zoom=zoom)
+            elif point:
                 marked, zoom = chat.mark_point(item["snapshot"], *point, self.store.directory / "points")
                 point = dict(x=point[0], y=point[1], marked=marked, zoom=zoom)
             readable = [self.store.assets, self.store.directory / "points"]

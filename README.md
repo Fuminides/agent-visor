@@ -69,7 +69,7 @@ Visor records `CODEX_THREAD_ID` (or `CODEX_SESSION_ID`) and the local control so
 
 **Claude Code: ask in a read-only fork.** The first question creates a fork (`claude --resume <id> --fork-session`); later questions continue it. **New thread** starts another fork. The fork can only read and search (`Read`, `Grep`, `Glob`, no MCP servers), and leaves the original session unchanged. **Stop** stops the fork's answer.
 
-Right-click a figure to mark a point. The next question includes its coordinates, a saved copy of that exact figure version with the point circled, and a zoom. Slides also include the selected page number. **Copy command** copies a terminal command for the connected Codex thread or the Claude fork. Each entry keeps its question history.
+Right-click a figure to mark a point, or hold the right button and drag to frame a region. The next question includes the coordinates, a saved copy of that exact figure version with the point circled or the region framed, and a zoom of it. Slides also include the selected page number. **Copy command** copies a terminal command for the connected Codex thread or the Claude fork. Each entry keeps its question history.
 
 Older Codex entries have no recorded session; show the image or track the run again from its original session to connect it. Images opened by hand have no session to ask.
 
@@ -98,7 +98,7 @@ The first call opens the window. Later calls update it without raising it or tak
 - Up/down arrows and the ← → buttons: newer/older history entry.
 - `Ctrl+O`: open images by hand.
 - `S` or the button at the left of the header: close or reopen the sidebar. The ✕ at the top of the question panel (or **Ask**) closes that panel. With both closed the figure has the whole window; the choice is remembered.
-- Right-click on the image: mark a point to ask about the element there. Opens the question panel if it is closed.
+- Right-click on the image: mark a point to ask about the element there; drag with the right button to frame a region instead. Opens the question panel if it is closed.
 - In the question panel: `Enter` sends and `Shift+Enter` adds a line. While you type, the window shortcuts are off; click the image to get them back.
 - **EN | ES** in the header switches the interface between English and Spanish.
 - The four dots in the header choose the colours of the window: sand (warm, the default), stone (grey and white), sky (bluish) and dark. The choice is remembered.

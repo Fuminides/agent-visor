@@ -528,6 +528,19 @@ class ChatTests(unittest.TestCase):
             self.assertIn("x=100, y=50", text)
             self.assertIn(marked, text)
             self.assertIn(zoom, text)
+            # A framed region: its edge is red in the copy, and the zoom is the region with a little around it.
+            framed, zoom = chat.mark_region(snapshot, (200, 100, 320, 160), Path(directory) / "points")
+            self.assertTrue(red_near(framed, 200, 130, 4) and red_near(framed, 320, 130, 4) and red_near(framed, 260, 100, 4))
+            self.assertFalse(red_near(framed, 260, 130, 20))  # the inside is left as it was
+            self.assertFalse(red_near(framed, 60, 250, 30))
+            with Image.open(zoom) as image:
+                self.assertEqual(image.size, (768, round(84 * 768 / 144)))  # 120 x 60 plus 12 px on every side
+            asked = chat.prompt("What is in here?", item, True, dict(box=(200, 100, 320, 160), marked=framed, zoom=zoom))
+            self.assertIn("from x=200, y=100 to x=320, y=160", asked)
+            self.assertIn("50 to 80 % of the width", asked)
+            self.assertIn(framed, asked)
+            self.assertIn(zoom, asked)
+            self.assertTrue(asked.endswith("What is in here?"))
             self.assertTrue(text.endswith("What is this?"))
         with patch("agent_visor.chat.claude_binary", return_value="claude"):
             args = chat.command("orig", None, "pregunta", ["/data/images", "/data/points"])
@@ -1046,7 +1059,10 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                     self.assertEqual(str(app.copy_button.cget("state")), "normal")
                     width, height = app.canvas.winfo_width(), app.canvas.winfo_height()
                     app.canvas.event_generate("<Button-3>", x=width // 2, y=height // 2)
+                    app.canvas.event_generate("<B3-Motion>", x=width // 2 + 2, y=height // 2 + 1)  # a click is never perfectly still
+                    app.canvas.event_generate("<ButtonRelease-3>", x=width // 2 + 2, y=height // 2 + 1)
                     root.update()
+                    self.assertEqual(len(app.point), 2)
                     self.assertTrue(abs(app.point[0] - 150) <= 2 and abs(app.point[1] - 100) <= 2, app.point)
                     self.assertTrue(app.canvas.find_withtag("marker"))
                     self.assertTrue(app.point_bar.winfo_ismapped())
@@ -1059,6 +1075,30 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                         time.sleep(.02)
                     self.assertTrue(store.messages(app.thread["id"])[-3]["text"].startswith("◉ ("))
                     first, second, third = [json.loads(line) for line in calls.read_text().splitlines()]
+                    # Holding the right button and dragging frames a region, in whatever direction it is dragged.
+                    app.canvas.event_generate("<Button-3>", x=width // 2 + 50, y=height // 2 + 20)
+                    app.canvas.event_generate("<B3-Motion>", x=width // 2, y=height // 2)
+                    root.update()
+                    self.assertEqual(app.canvas.type(app.canvas.find_withtag("marker")[0]), "rectangle")  # drawn while dragging
+                    app.canvas.event_generate("<B3-Motion>", x=width // 2 - 40, y=height // 2 - 30)
+                    app.canvas.event_generate("<ButtonRelease-3>", x=width // 2 - 40, y=height // 2 - 30)
+                    root.update()
+                    left, top, right, bottom = app.point
+                    self.assertTrue(all(abs(found - wanted) <= 2 for found, wanted in zip(app.point, (110, 70, 200, 120))), app.point)
+                    self.assertIn(f"{right - left} × {bottom - top} px", app.point_label.cget("text"))
+                    self.assertEqual(root.focus_get(), app.chat_input)
+                    app.chat_input.insert("1.0", "And this part?")
+                    app.send_or_stop()
+                    self.assertIsNone(app.point)
+                    self.assertFalse(app.canvas.find_withtag("marker"))
+                    deadline = time.monotonic() + 10
+                    while app.runs and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(.02)
+                    self.assertTrue(store.messages(app.thread["id"])[-3]["text"].startswith(f"▭ ({left}, {top})–({right}, {bottom})"))
+                    fourth = json.loads(calls.read_text().splitlines()[3])
+                    self.assertIn(f"from x={left}, y={top} to x={right}, y={bottom}", fourth[-1])
+                    self.assertTrue(all(Path(path).exists() for path in re.findall(r"\((/[^();]+\.png)\)", fourth[-1])))
                     self.assertIn("y=", third[-1])
                     marks = re.findall(r"\((/[^();]+\.png)\)", third[-1])
                     self.assertEqual(len(marks), 2)
