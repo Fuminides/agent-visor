@@ -350,6 +350,17 @@ class RunTests(unittest.TestCase):
         (self.directory / "data/visor.log").write_text("nothing here\n{broken\n[1, 2]\n")
         self.assertEqual(runs.state(runs.advance(self.store, other["id"])[0]), "waiting")
 
+    def test_lines_without_a_step_stay_off_the_curves_of_a_log_that_has_steps(self):
+        # Each epoch as a JSON line without a step followed by its [k/N] line: the curves follow the steps only.
+        text = "".join(f'{{"epoch": {k - 1}, "loss": {1 / k}, "seconds": 30}}\n[{k}/9] loss={1 / k:.4f}\n'
+                       for k in range(1, 5))
+        data = self.follow(text, metrics=["loss"])["data"]
+        self.assertEqual(data["series"], {"loss": [[1, 1.0], [2, .5], [3, .3333], [4, .25]]})
+        self.assertEqual(data["info"], {"epoch": "3", "seconds": "30"})
+        # A log that never gives a step still draws its numbers over the lines read.
+        data = self.follow('{"loss": 1}\n{"loss": 0.5}\n', metrics=["loss"])["data"]
+        self.assertEqual(data["series"], {"loss": [[1, 1], [2, .5]]})
+
     def test_time_left_comes_from_the_pace_seen_while_following(self):
         run = self.follow("".join(f"[{k}/10] loss=1\n" for k in range(1, 5)))
         self.assertEqual(run["data"]["seen"], [])  # what the file already held says nothing about the pace

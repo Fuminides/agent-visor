@@ -99,6 +99,8 @@ def parse(data, chunk, chosen=()):
         data["lines"] += 1
         step, total = number(values.pop("step", None)), number(values.pop("total", None))
         if step is not None:
+            if data["step"] is None:
+                data["series"] = {}  # drawn over the lines read so far; from the first step on, curves follow steps
             data["step"] = step
         if total is not None:
             data["total"] = total
@@ -106,6 +108,8 @@ def parse(data, chunk, chosen=()):
         for key, value in values.items():
             key, y = str(key)[:60], number(value)
             curve = y is not None and (key in chosen if chosen else True)
+            if curve and step is None and data["step"] is not None:
+                continue  # a line without a step in a log that has them: its count is not on the steps' axis
             if curve and (key in data["series"] or len(data["series"]) < MAX_SERIES):
                 points = data["series"].setdefault(key, [])
                 points.append([x, y])
