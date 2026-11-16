@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import io
 import json
 import math
 import os
@@ -18,11 +19,24 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, ttk
 import traceback
 
-from PIL import Image, ImageDraw, ImageOps, ImageTk
+from PIL import Image, ImageDraw, ImageOps
 
 from . import chat, codex, i18n, mirror, runs
 from .ipc import MAX_REQUEST, runtime_dir, socket_path
 from .storage import Store, conversation, signature
+
+
+
+def photo(image):
+    """A Tk image of a PIL image. Tk reads PPM and PNG itself; Pillow's ImageTk cannot attach to a Python
+    whose Tcl is built in and not exported (uv's standalone builds)."""
+    data = io.BytesIO()
+    if image.mode == "RGB":
+        image.save(data, "PPM")
+    else:
+        image.save(data, "PNG", compress_level=0)
+    return tk.PhotoImage(data=data.getvalue())
+
 
 # The window's colours. Each theme gives the same names a value, and use_theme() makes one current by
 # setting them as module globals, which the window reads whenever it is built:
@@ -333,7 +347,7 @@ class Visor:
                 draw.ellipse((x - 6 * unit, y - 6 * unit, x + 6 * unit, y + 6 * unit), fill=icon[1], outline=EDGE, width=unit // 2)
                 if icon[2]:
                     draw.ellipse((x - 9.5 * unit, y - 9.5 * unit, x + 9.5 * unit, y + 9.5 * unit), outline=INK, width=round(1.5 * unit))
-            self.faces[key] = ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.BOX))
+            self.faces[key] = photo(image.resize((width, height), Image.Resampling.BOX))
         button.configure(image=self.faces[key], fg=ink, activeforeground=ink)
 
     def font(self, size, weight="normal"):
@@ -352,7 +366,7 @@ class Visor:
             sheet = Image.new("RGBA", (side, side), around)
             sheet.putalpha(mask)
             sheet = sheet.resize((radius * 2, radius * 2), Image.Resampling.BOX)
-            self.faces[key] = [ImageTk.PhotoImage(sheet.crop((x, y, x + radius, y + radius)))
+            self.faces[key] = [photo(sheet.crop((x, y, x + radius, y + radius)))
                                for y in (0, radius) for x in (0, radius)]
         corners = [tk.Label(frame, image=image, bd=0, padx=0, pady=0, bg=frame.cget("bg")) for image in self.faces[key]]
         for corner, (x, y, anchor) in zip(corners, ((0, 0, "nw"), (1, 0, "ne"), (0, 1, "sw"), (1, 1, "se"))):
@@ -368,8 +382,8 @@ class Visor:
         header = tk.Frame(self.root, bg=BG, height=self.px(54))
         header.pack(fill="x")
         header.pack_propagate(False)
-        self.header_mark = ImageTk.PhotoImage(visor_mark(self.px(26), ACCENT, ON_ACCENT, BG))
-        self.empty_mark = ImageTk.PhotoImage(visor_mark(self.px(56), EDGE, STAGE, STAGE))
+        self.header_mark = photo(visor_mark(self.px(26), ACCENT, ON_ACCENT, BG))
+        self.empty_mark = photo(visor_mark(self.px(56), EDGE, STAGE, STAGE))
         self._button(header, "", self.toggle_sidebar, "quiet", padx=17, icon="sidebar").pack(side="left", padx=(12, 8))
         tk.Label(header, image=self.header_mark, bg=BG, bd=0).pack(side="left", padx=(0, 9))
         self._label(header, "Visor", size=13, weight="bold").pack(side="left")
@@ -563,7 +577,7 @@ class Visor:
         if key not in self.thumbnails:
             small = Path(snapshot).with_suffix(".thumb.png")
             try:
-                self.thumbnails[key] = ImageTk.PhotoImage(tile(small if small.exists() else snapshot, width, height, self.px(4), EDGE))
+                self.thumbnails[key] = photo(tile(small if small.exists() else snapshot, width, height, self.px(4), EDGE))
             except (OSError, ValueError):
                 self.thumbnails[key] = None
         return self.thumbnails[key]
@@ -792,7 +806,7 @@ class Visor:
 
     def _icon(self):
         # Several sizes, so the window manager scales down from a sharp one instead of up from 64 px.
-        self.window_icons = [ImageTk.PhotoImage(visor_mark(size, *ICON)) for size in (256, 128, 64, 48, 32, 16)]
+        self.window_icons = [photo(visor_mark(size, *ICON)) for size in (256, 128, 64, 48, 32, 16)]
         self.root.iconphoto(True, *self.window_icons)
 
     def refresh_sessions(self):
@@ -1036,7 +1050,7 @@ class Visor:
             size = (max(1, round((box[2] - box[0]) * self.scale)), max(1, round((box[3] - box[1]) * self.scale)))
             if not self.scaled or self.scaled[0] != (box, size):  # the same view again (a marker, a repaint) is not scaled again
                 self.scaled = (box, size), self.original.crop(box).resize(size, Image.Resampling.LANCZOS, reducing_gap=2.0)
-            self.photo = ImageTk.PhotoImage(self.scaled[1])
+            self.photo = photo(self.scaled[1])
             canvas.create_image(left + box[0] * self.scale, top + box[1] * self.scale, image=self.photo, anchor="nw")
         self.draw_marker()
         self.zoom_label.configure(text=f"{round(self.scale * 100)} %")
@@ -1089,7 +1103,7 @@ class Visor:
             draw.ellipse(box, outline=EDGE, width=stroke)
             if share:
                 draw.arc(box, -90, -90 + 6 * share, fill=color, width=stroke)
-            self.faces[key] = ImageTk.PhotoImage(image.resize((width // 4, height // 4), Image.Resampling.BOX))
+            self.faces[key] = photo(image.resize((width // 4, height // 4), Image.Resampling.BOX))
         return self.faces[key]
 
     def paint_run_row(self, run):
@@ -1312,7 +1326,7 @@ class Visor:
         self.run_height = y + self.run_scroll + p(10)
         for mark in marks:
             mark()
-        self.photo = ImageTk.PhotoImage(sheet.resize((width, height), Image.Resampling.BOX))
+        self.photo = photo(sheet.resize((width, height), Image.Resampling.BOX))
         canvas.tag_lower(canvas.create_image(0, 0, image=self.photo, anchor="nw"))
         self.point_at()
 

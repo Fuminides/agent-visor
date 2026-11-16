@@ -11,7 +11,7 @@ MARKER = "# agent-visor launcher"
 
 
 def install(home, interpreter, desktop=True):
-    subprocess.run([interpreter, "-c", "import tkinter; from PIL import Image, ImageTk"], check=True)
+    subprocess.run([interpreter, "-c", "import tkinter; from PIL import Image"], check=True)
     command = home / ".local/bin/visor"
     skill = ROOT / "skills/agent-visor"
     links = [home / ".codex/skills/agent-visor", home / ".claude/skills/agent-visor"]
