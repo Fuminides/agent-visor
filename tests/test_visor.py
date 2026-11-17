@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import concurrent.futures
+import gc
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -55,6 +58,50 @@ class StorageTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_connections_close_after_commit_and_rollback(self):
+        with self.store.connect() as conn:
+            conn.execute("INSERT INTO settings VALUES ('committed', 'true')")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+        self.assertIs(self.store.setting("committed"), True)
+
+        with self.assertRaisesRegex(RuntimeError, "abort transaction"):
+            with self.store.connect() as conn:
+                conn.execute("INSERT INTO settings VALUES ('rolled_back', 'true')")
+                raise RuntimeError("abort transaction")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+        self.assertIsNone(self.store.setting("rolled_back"))
+
+    @unittest.skipUnless(Path("/proc/self/fd").exists(), "Needs Linux descriptor accounting")
+    def test_live_run_polling_does_not_accumulate_database_handles(self):
+        log = self.directory / "run.log"
+        log.write_text("[1/10000] loss=0.5\n")
+        run = self.store.track(str(log), "Long run")
+        gc.collect()
+        baseline = len(list(Path("/proc/self/fd").iterdir()))
+        was_enabled = gc.isenabled()
+        gc.disable()  # Resource lifetime must not depend on cyclic garbage collection.
+        try:
+            for _ in range(300):
+                self.assertEqual(runs.advance(self.store, run["id"])[0]["data"]["step"], 1)
+                self.store.setting("follow", True)
+                self.store.history()
+            self.assertLessEqual(len(list(Path("/proc/self/fd").iterdir())), baseline + 2)
+        finally:
+            if was_enabled:
+                gc.enable()
+            gc.collect()
+
+    def test_run_lookup_preserves_callers_transaction(self):
+        run = self.store.track(str(self.directory / "run.log"), "Study")
+        with self.store.connect() as conn:
+            conn.execute("UPDATE runs SET title='Uncommitted' WHERE id=?", (run["id"],))
+            self.assertEqual(self.store.run(run["id"], conn)["title"], "Uncommitted")
+            conn.execute("UPDATE runs SET title='Committed' WHERE id=?", (run["id"],))
+        self.assertEqual(self.store.run(run["id"])["title"], "Committed")
+        self.assertIsNone(self.store.run("missing"))
 
     def test_snapshot_survives_source_replacement_and_deletion(self):
         first = self.store.ingest([str(self.source)], "study", "Before")[0]
@@ -614,6 +661,38 @@ class StartupTests(unittest.TestCase):
                     pass
 
 
+class RunWorkerTests(unittest.TestCase):
+    def test_database_failures_are_retried_without_losing_the_run(self):
+        from agent_visor.app import Visor
+        app = Visor.__new__(Visor)
+        app.closing = False
+        app.events = queue.Queue()
+        app.store = Mock()
+        recovered = {"id": "run-id", "closed": True}
+        with patch("agent_visor.app.runs.advance", side_effect=[
+            sqlite3.OperationalError("unable to open database file"),
+            sqlite3.OperationalError("unable to open database file"),
+            (recovered, True),
+        ]) as advance, patch("agent_visor.app.time.sleep") as sleep:
+            app.run_worker("run-id")
+        self.assertEqual(advance.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        events = [app.events.get_nowait()[0] for _ in range(app.events.qsize())]
+        self.assertEqual([event["action"] for event in events], ["notice", "run", "run_end"])
+        self.assertFalse(events[-1]["failed"])
+
+    def test_database_retry_stops_when_window_closes(self):
+        from agent_visor.app import Visor
+        app = Visor.__new__(Visor)
+        app.closing = False
+        app.events = queue.Queue()
+        app.store = Mock()
+        with patch("agent_visor.app.runs.advance", side_effect=sqlite3.OperationalError("database is locked")) as advance:
+            with patch("agent_visor.app.time.sleep", side_effect=lambda _: setattr(app, "closing", True)):
+                app.run_worker("run-id")
+        advance.assert_called_once()
+
+
 @unittest.skipUnless(graphical(), "No graphical desktop access")
 class DesktopIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -730,6 +809,25 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.assertNotEqual(new["pid"], state["pid"])
         self.assertEqual(len(self.cli("history", "--json")["items"]), 2)
 
+    def test_tracking_recovers_after_database_disappears_and_window_stays_responsive(self):
+        log = self.directory / "train.log"
+        log.write_text("[1/4] loss=0.9\n")
+        state = self.cli("track", log, "--session", "Recovery", "--json")
+        data = self.directory / "data"
+        offline = self.directory / "offline"
+        data.rename(offline)
+        try:
+            # Give the worker a polling cycle with the database unavailable.
+            time.sleep(2.5)
+            self.assertEqual(self.cli("status", "--json")["pid"], state["pid"])
+            with log.open("a") as handle:
+                handle.write("[2/4] loss=0.5\n")
+        finally:
+            offline.rename(data)
+        store = Store(data)
+        self.wait_for(lambda: store.run(state["run_id"])["data"]["step"] == 2)
+        self.assertEqual(self.cli("status", "--json")["pid"], state["pid"])
+
     def test_frozen_window_is_not_replaced_and_reuses_its_socket_when_resumed(self):
         state = self.cli("open", "--json")
         path = self.directory / "run/visor.sock"
@@ -774,7 +872,7 @@ class WindowBehaviorTests(unittest.TestCase):
                     if failure == "missing":
                         store.directory.rename(Path(directory) / "offline")
                     else:
-                        connection = store.connect()
+                        connection = sqlite3.connect(store.db)
                         connection.execute("BEGIN IMMEDIATE")
                     errors = io.StringIO()
                     started = time.monotonic()

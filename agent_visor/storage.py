@@ -1,6 +1,7 @@
 """Persistent, immutable image snapshots. No GUI imports in this module."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -189,10 +190,17 @@ class Store:
                     SELECT COALESCE(deck,id) FROM images WHERE agent_provider='codex'
                     UNION SELECT id FROM runs WHERE agent_provider='codex')""")
 
+    @contextmanager
     def connect(self, timeout=15):
+        """Commit or roll back the transaction, then release its database handles immediately."""
         conn = sqlite3.connect(self.db, timeout=timeout)
-        conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            # sqlite3's own context manager handles the transaction but does not close it.
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def ingest(self, paths, session, title="", caption="", deck=False, agent_session=None, agent_cwd=None, agent_provider=None, agent_socket=None):
         """Store every path; a PDF becomes one deck, and deck=True joins the whole call into one."""
@@ -383,7 +391,10 @@ class Store:
         return self.new_run({key: run[key] for key in ("session", "title", "source", "metrics", "agent_session", "agent_cwd", "agent_provider", "agent_socket")})
 
     def run(self, run_id, conn=None):
-        row = (conn or self.connect()).execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        if conn is None:
+            with self.connect() as conn:
+                return self.run(run_id, conn)
+        row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         return self._run(row) if row else None
 
     @staticmethod

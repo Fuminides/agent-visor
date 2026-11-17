@@ -11,6 +11,7 @@ import queue
 import re
 import shlex
 import socketserver
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -1121,10 +1122,19 @@ class Visor:
 
     def run_worker(self, started):
         """Off the Tk thread: the window only hears that a run has something new."""
-        run_id, failed = started, True
+        run_id, failed, database_error = started, True, None
         try:
-            while True:
-                run, changed = runs.advance(self.store, run_id)
+            while not self.closing:
+                try:
+                    run, changed = runs.advance(self.store, run_id)
+                except sqlite3.OperationalError as exc:
+                    # A busy or temporarily unavailable database must not permanently stop tracking.
+                    if str(exc) != database_error:
+                        database_error = str(exc)
+                        self.events.put(({"action": "notice", "message": database_error}, None, None))
+                    time.sleep(2)
+                    continue
+                database_error = None
                 if run is None:
                     break
                 run_id = run["id"]
