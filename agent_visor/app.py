@@ -22,7 +22,7 @@ import traceback
 from PIL import Image, ImageDraw, ImageOps
 
 from . import chat, codex, i18n, mirror, runs
-from .ipc import MAX_REQUEST, runtime_dir, socket_path
+from .ipc import MAX_REQUEST, server_lock, socket_path
 from .storage import Store, conversation, signature
 
 
@@ -174,6 +174,7 @@ class Visor:
     def __init__(self, root, store):
         self.root = root
         self.store = store
+        self.closing = False
         self.events = queue.Queue()
         self.session = None
         self.items = []
@@ -1899,11 +1900,23 @@ class Visor:
         self.root.after(50, self.poll_events)
 
     def close(self):
+        if self.closing:
+            return
+        self.closing = True
+        self.mirrors.clear()  # do not reconnect feeds while shutting down
         for process in [*self.runs.values(), *self.feeds.values()]:
-            process.terminate()
-        self.store.set_setting("geometry", self.root.geometry())
-        self.store.set_setting("follow", self.follow.get())
-        self.root.destroy()
+            try:
+                process.terminate()
+            except Exception:
+                traceback.print_exc()
+        try:
+            # Saving preferences must not trap the user in a window with a busy/missing database.
+            self.store.set_setting("geometry", self.root.geometry(), timeout=.2)
+            self.store.set_setting("follow", self.follow.get(), timeout=.2)
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self.root.destroy()
 
 
 class Handler(socketserver.StreamRequestHandler):
@@ -1970,17 +1983,25 @@ class Server(socketserver.ThreadingUnixStreamServer):
 
 
 def run():
-    root = tk.Tk(className="AgentVisor")
-    app = Visor(root, Store())
-    directory = runtime_dir()
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    server = Server(socket_path(), Handler)
-    os.chmod(socket_path(), 0o600)
-    server.app = app
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        root.mainloop()
-    finally:
-        server.shutdown()
-        server.server_close()
-        Path(socket_path()).unlink(missing_ok=True)
+    with server_lock():
+        # Only the lifetime-lock owner can replace a leftover socket or remove it on exit.
+        path = Path(socket_path())
+        path.unlink(missing_ok=True)
+        root = tk.Tk(className="AgentVisor")
+        try:
+            app = Visor(root, Store())
+            server = Server(str(path), Handler)
+            os.chmod(path, 0o600)
+            server.app = app
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                root.mainloop()
+            finally:
+                server.shutdown()
+                server.server_close()
+                path.unlink(missing_ok=True)
+        finally:
+            try:
+                root.destroy()
+            except tk.TclError:  # close() already destroyed the application
+                pass

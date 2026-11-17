@@ -77,11 +77,11 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         if args.command == "status":
-            state = running() or {"ok": True, "running": False}
+            state = running(check_owner=True) or {"ok": True, "running": False}
             emit(state, args.json, "Visor is open." if state.get("running") else "Visor is closed. It opens when an image is shown.")
             return 0
         if args.command == "stop":
-            state = request({"action": "stop"}) if running() else {"ok": True, "running": False}
+            state = request({"action": "stop"}) if running(check_owner=True) else {"ok": True, "running": False}
             emit(state, args.json, "Visor closed. History kept.")
             return 0
         if args.command == "history":

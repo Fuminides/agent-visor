@@ -14,11 +14,11 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from agent_visor import chat, mirror, runs
+from agent_visor import chat, ipc, mirror, runs
 from agent_visor.cli import default_session
 from agent_visor.storage import Store, page_count, signature
 
@@ -587,6 +587,33 @@ class ChatTests(unittest.TestCase):
                 self.assertEqual(chat.session_cwd("00000000-0000-0000-0000-000000000000", directory), directory)
 
 
+class StartupTests(unittest.TestCase):
+    def test_status_and_stop_do_not_report_closed_when_the_owner_is_unresponsive(self):
+        from agent_visor.cli import main
+        with tempfile.TemporaryDirectory(prefix="av-state-") as directory:
+            with patch.dict(os.environ, {"VISOR_RUNTIME_DIR": directory}), ipc.server_lock():
+                for command in ("status", "stop"):
+                    output, errors = io.StringIO(), io.StringIO()
+                    with patch.object(ipc, "request", side_effect=TimeoutError), patch("sys.stdout", output), patch("sys.stderr", errors):
+                        self.assertEqual(main([command, "--json"]), 1)
+                    self.assertEqual(output.getvalue(), "")
+                    self.assertIn("already open but is not responding", errors.getvalue())
+
+    def test_unresponsive_owner_keeps_its_socket_and_does_not_spawn(self):
+        with tempfile.TemporaryDirectory(prefix="av-lock-") as directory:
+            with patch.dict(os.environ, {"VISOR_RUNTIME_DIR": directory}), patch.object(ipc, "running", return_value=None):
+                path = Path(ipc.socket_path())
+                path.write_text("the old socket")
+                with ipc.server_lock(), patch.object(ipc.subprocess, "Popen") as spawn:
+                    with self.assertRaisesRegex(RuntimeError, "already open but is not responding"):
+                        ipc.ensure_running()
+                    spawn.assert_not_called()
+                    self.assertEqual(path.read_text(), "the old socket")
+                # Releasing the lifetime lock makes it available for the next window.
+                with ipc.server_lock():
+                    pass
+
+
 @unittest.skipUnless(graphical(), "No graphical desktop access")
 class DesktopIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -703,9 +730,71 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.assertNotEqual(new["pid"], state["pid"])
         self.assertEqual(len(self.cli("history", "--json")["items"]), 2)
 
+    def test_frozen_window_is_not_replaced_and_reuses_its_socket_when_resumed(self):
+        state = self.cli("open", "--json")
+        path = self.directory / "run/visor.sock"
+        inode = path.stat().st_ino
+        os.kill(state["pid"], signal.SIGSTOP)
+        try:
+            attempted = self.cli("open", "--json", check=False)
+            self.assertNotEqual(attempted.returncode, 0)
+            self.assertIn("already open but is not responding", attempted.stderr)
+            self.assertEqual(path.stat().st_ino, inode)
+        finally:
+            os.kill(state["pid"], signal.SIGCONT)
+        self.assertEqual(self.cli("status", "--json")["pid"], state["pid"])
+
+    def test_direct_server_start_cannot_replace_an_existing_window(self):
+        state = self.cli("open", "--json")
+        inode = (self.directory / "run/visor.sock").stat().st_ino
+        attempted = self.cli("_serve", check=False)
+        self.assertNotEqual(attempted.returncode, 0)
+        self.assertIn("already open", attempted.stderr)
+        self.assertEqual((self.directory / "run/visor.sock").stat().st_ino, inode)
+        self.assertEqual(self.cli("status", "--json")["pid"], state["pid"])
+        # The deliberately rejected server reports its exception in the CLI, not the daemon log.
+
 
 @unittest.skipUnless(graphical(), "No graphical desktop access")
 class WindowBehaviorTests(unittest.TestCase):
+    def test_close_destroys_window_even_if_database_or_child_cleanup_fails(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        for failure in ("missing", "locked"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(prefix="av-close-") as directory:
+                store = Store(Path(directory) / "data")
+                root = tk.Tk()
+                connection = None
+                try:
+                    app = Visor(root, store)
+                    broken = Mock()
+                    broken.terminate.side_effect = OSError("child cleanup failed")
+                    other = Mock()
+                    app.runs = {"broken": broken, "other": other}
+                    if failure == "missing":
+                        store.directory.rename(Path(directory) / "offline")
+                    else:
+                        connection = store.connect()
+                        connection.execute("BEGIN IMMEDIATE")
+                    errors = io.StringIO()
+                    started = time.monotonic()
+                    with patch("sys.stderr", errors):
+                        app.close()
+                        app.close()  # duplicate close callbacks are harmless
+                    self.assertLess(time.monotonic() - started, 1.5)
+                    self.assertEqual(root.tk.call("info", "commands", "."), "")
+                    other.terminate.assert_called_once()
+                    self.assertIn("child cleanup failed", errors.getvalue())
+                    self.assertIn("OperationalError", errors.getvalue())
+                finally:
+                    if connection:
+                        connection.rollback()
+                        connection.close()
+                    try:
+                        root.destroy()
+                    except tk.TclError:
+                        pass
+
     def test_paused_follow_keeps_selection_and_zoom_is_bounded(self):
         import tkinter as tk
         from agent_visor.app import Visor

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fcntl
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -51,11 +52,30 @@ def request(payload, timeout=20):
         return result
 
 
-def running():
+def running(*, check_owner=False):
     try:
         return request({"action": "status"}, timeout=1)
     except (OSError, ValueError, RuntimeError):
+        if check_owner and (runtime_dir() / "server.lock").exists():
+            with server_lock():
+                pass
         return None
+
+
+@contextmanager
+def server_lock():
+    """Keep ownership for the window's whole lifetime, even when Tk stops answering."""
+    directory = runtime_dir()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if directory.stat().st_uid != os.getuid():
+        raise RuntimeError("The socket directory belongs to another user.")
+    directory.chmod(0o700)
+    with (directory / "server.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Visor is already open but is not responding. Its socket was kept; no second window was opened.") from None
+        yield
 
 
 def ensure_running():
@@ -81,9 +101,11 @@ def ensure_running():
         state = running()
         if state:
             return state
+        # A timeout is not proof that the old window exited. Never steal its socket.
+        with server_lock():
+            pass
         if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
             raise RuntimeError("No graphical session. Run visor on your local desktop.")
-        Path(socket_path()).unlink(missing_ok=True)
         logdir = data_dir()
         logdir.mkdir(parents=True, exist_ok=True, mode=0o700)
         logpath = logdir / "visor.log"

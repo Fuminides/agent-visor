@@ -189,8 +189,8 @@ class Store:
                     SELECT COALESCE(deck,id) FROM images WHERE agent_provider='codex'
                     UNION SELECT id FROM runs WHERE agent_provider='codex')""")
 
-    def connect(self):
-        conn = sqlite3.connect(self.db, timeout=15)
+    def connect(self, timeout=15):
+        conn = sqlite3.connect(self.db, timeout=timeout)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -455,6 +455,6 @@ class Store:
                 pass
         return default
 
-    def set_setting(self, key, value):
-        with self.connect() as conn:
+    def set_setting(self, key, value, *, timeout=15):
+        with self.connect(timeout=timeout) as conn:
             conn.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, json.dumps(value)))
