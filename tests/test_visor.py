@@ -660,6 +660,20 @@ class StartupTests(unittest.TestCase):
                 with ipc.server_lock():
                     pass
 
+    def test_window_does_not_connect_to_the_desktop_input_method(self):
+        # A window that asks ibus for an input context waits for the answer forever.
+        from agent_visor import app
+        seen = []
+
+        def no_window(**_):
+            seen.append(os.environ.get("XMODIFIERS"))
+            raise RuntimeError("no window in this test")
+        with tempfile.TemporaryDirectory(prefix="av-im-") as directory:
+            with patch.dict(os.environ, {"VISOR_RUNTIME_DIR": directory, "XMODIFIERS": "@im=ibus"}), patch.object(app.tk, "Tk", side_effect=no_window):
+                with self.assertRaisesRegex(RuntimeError, "no window in this test"):
+                    app.run()
+        self.assertEqual(seen, ["@im=none"])
+
 
 class RunWorkerTests(unittest.TestCase):
     def test_database_failures_are_retried_without_losing_the_run(self):

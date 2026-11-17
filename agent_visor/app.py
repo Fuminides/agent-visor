@@ -1997,6 +1997,9 @@ def run():
         # Only the lifetime-lock owner can replace a leftover socket or remove it on exit.
         path = Path(socket_path())
         path.unlink(missing_ok=True)
+        # Tk waits with no timeout for the desktop input method to answer: when ibus fails to, the window
+        # freezes for good. Xlib's own method still composes accents.
+        os.environ["XMODIFIERS"] = "@im=none"
         root = tk.Tk(className="AgentVisor")
         try:
             app = Visor(root, Store())

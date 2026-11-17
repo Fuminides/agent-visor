@@ -71,6 +71,7 @@ class Dialog:
 def main(prompt):
     print(ASKED, file=sys.stderr, flush=True)
     store = Store()
+    os.environ["XMODIFIERS"] = "@im=none"  # as in the main window: never wait on an input method that may not answer
     root = tk.Tk(className="AgentVisor")
     dialog = Dialog(root, prompt, os.environ.get("SSH_ASKPASS_PROMPT"), store.setting("language", "en"), store.setting("theme", "sand"))
     asker = os.getppid()
