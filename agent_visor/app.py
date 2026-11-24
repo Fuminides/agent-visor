@@ -1,6 +1,7 @@
 """Native Tk window. All widget operations stay on the Tk event thread."""
 from __future__ import annotations
 
+import ctypes
 from datetime import datetime
 import io
 import json
@@ -2000,6 +2001,13 @@ def run():
         # Tk waits with no timeout for the desktop input method to answer: when ibus fails to, the window
         # freezes for good. Xlib's own method still composes accents.
         os.environ["XMODIFIERS"] = "@im=none"
+        # glibc raises its mmap threshold each time a large buffer is freed, and from then on keeps freed
+        # figures in its heap instead of returning them: the window grew by half as figures went by.
+        # A fixed threshold hands each one back when it is freed.
+        try:
+            ctypes.CDLL(None).mallopt(-3, 1 << 20)  # M_MMAP_THRESHOLD
+        except AttributeError:  # a C library without mallopt
+            pass
         root = tk.Tk(className="AgentVisor")
         try:
             app = Visor(root, Store())
