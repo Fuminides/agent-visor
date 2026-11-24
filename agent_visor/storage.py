@@ -23,6 +23,7 @@ MAX_PIXELS = 24_000_000
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_PAGES = 100
 PDF_LONG_SIDE = 2400
+KEEP_DAYS = 30  # older history entries are deleted (see Store.prune)
 
 
 def data_dir() -> Path:
@@ -303,12 +304,15 @@ class Store:
         with self.connect() as conn:
             rows = {row["session"]: dict(row) for row in conn.execute(
                 # entries: history entries (a deck counts once). snapshot: the newest image (SQLite takes it from the MAX row).
-                "SELECT session,COUNT(*) AS count,COUNT(DISTINCT COALESCE(deck,id)) AS entries,MAX(created) AS updated,snapshot "
-                "FROM images GROUP BY session")}
+                "SELECT session,COUNT(*) AS count,COUNT(DISTINCT COALESCE(deck,id)) AS entries,MAX(created) AS updated,snapshot,"
+                "MAX(created) AS active FROM images GROUP BY session")}
             # A live run is one more entry of its conversation; a conversation may hold only runs.
-            for run in conn.execute("SELECT session,COUNT(*) AS entries,MAX(created) AS updated FROM runs GROUP BY session"):
-                row = rows.setdefault(run["session"], dict(session=run["session"], count=0, entries=0, updated=0, snapshot=None))
-                row.update(entries=row["entries"] + run["entries"], updated=max(row["updated"], run["updated"]))
+            # active: when the conversation last got anything, the last line of a run included.
+            for run in conn.execute("SELECT session,COUNT(*) AS entries,MAX(created) AS updated,MAX(updated) AS active "
+                                    "FROM runs GROUP BY session"):
+                row = rows.setdefault(run["session"], dict(session=run["session"], count=0, entries=0, updated=0, snapshot=None, active=0))
+                row.update(entries=row["entries"] + run["entries"], updated=max(row["updated"], run["updated"]),
+                           active=max(row["active"], run["active"]))
         return sorted(rows.values(), key=lambda row: row["updated"], reverse=True)
 
     def history(self, session=None, limit=200, collapse=False, since=None):
@@ -325,6 +329,33 @@ class Store:
         sql = "SELECT * FROM images" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created DESC LIMIT ?"
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, (*values, limit))]
+
+    def prune(self, days=KEEP_DAYS):
+        """Delete the figures shown more than `days` days ago and the finished runs that last moved before then,
+        with their chats and their files. Returns how many history entries went. The newest figure and the newest
+        run always stay, so the positions `visor feed` continues from (rowids) never start over."""
+        cutoff = time.time() - days * 86400
+        with self.connect() as conn:
+            # A presentation goes whole, by its newest slide.
+            figures = conn.execute("""SELECT id, COALESCE(deck,id) AS entry FROM images WHERE COALESCE(deck,id) IN (
+                SELECT COALESCE(deck,id) FROM images GROUP BY 1
+                HAVING MAX(created)<? AND MAX(rowid)<(SELECT MAX(rowid) FROM images))""", (cutoff,)).fetchall()
+            runs = [row["id"] for row in conn.execute(
+                "SELECT id FROM runs WHERE closed=1 AND updated<? AND rowid<(SELECT MAX(rowid) FROM runs)", (cutoff,))]
+            entries = [(entry,) for entry in {row["entry"] for row in figures} | set(runs)]
+            conn.executemany("DELETE FROM images WHERE id=?", [(row["id"],) for row in figures])
+            conn.executemany("DELETE FROM runs WHERE id=?", [(run,) for run in runs])
+            conn.executemany("DELETE FROM messages WHERE thread IN (SELECT id FROM threads WHERE entry=?)", entries)
+            conn.executemany("DELETE FROM threads WHERE entry=?", entries)
+        # Files after rows: stopping in between leaves a file nothing lists, never an entry without its figure.
+        # Named from the id, inside this store: a database copied elsewhere never deletes the figures of the original.
+        for row in figures:
+            (self.assets / f"{row['id']}.png").unlink(missing_ok=True)
+            (self.assets / f"{row['id']}.thumb.png").unlink(missing_ok=True)
+        for marked in (self.directory / "points").glob("*.png"):  # figures marked for a question
+            if marked.stat().st_mtime < cutoff:
+                marked.unlink()
+        return len(entries)
 
     def versions(self, session):
         """{entry: (n, total)}: position of each entry among the entries made from the same source file."""

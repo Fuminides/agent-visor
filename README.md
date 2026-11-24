@@ -85,6 +85,8 @@ The button at the top of the sidebar names the project being shown. Click it to 
 
 ![The list of conversations grouped by project, here in the sky theme](assets/readme/conversations.png)
 
+A conversation with nothing new for 3 days moves under **Archived**, a group at the end of the list that opens with a click. Nothing is deleted by this: the filter still finds archived conversations, and one comes back to the list as soon as it gets a new figure or run. A run counts until its last line, and the conversation on screen is never archived.
+
 A conversation is one `--session` value, or one folder. `--session "Study / comparison"` is the conversation "comparison" of the project "Study". A folder is filed under its git repository, so a subfolder or a linked worktree (`git worktree`) appears as a conversation of the main repository's project, next to that project's named conversations.
 
 ## Recent history
@@ -158,7 +160,7 @@ Keep this folder where it is, since the command and the skill link to it. If you
 - IPC: a private Unix socket in `$XDG_RUNTIME_DIR/agent-visor/`, or `~/.cache/agent-visor/`.
 - No network ports, accounts or API keys. Only the question panel sends questions to an agent, through your local Codex server or `claude` command, and only when you send a question. `visor follow` opens an outgoing `ssh` connection to the computer you name and nothing else.
 
-XDG directories are respected. `VISOR_DATA_DIR` and `VISOR_RUNTIME_DIR` isolate data and processes, for example during tests. The history stays on disk until you delete it.
+XDG directories are respected. `VISOR_DATA_DIR` and `VISOR_RUNTIME_DIR` isolate data and processes, for example during tests. History entries are deleted 30 days after they were shown (a run, 30 days after its last line), with their saved images and questions; the latest figure and the latest run are always kept. This happens when the window opens and once a day while it stays open.
 
 ## Development
 

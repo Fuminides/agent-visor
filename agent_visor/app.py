@@ -90,6 +90,7 @@ SERIFS = ("Source Serif 4", "Source Serif Pro", "Noto Serif", "Bitstream Charter
 # With the question panel open the window needs room for sidebar, panel and a usable figure.
 CHAT_MIN_WINDOW = 1080
 SIDEBAR = 272
+ARCHIVE_DAYS = 3  # a conversation with nothing new for this long is listed under Archived
 INLINE = re.compile(r"(\*\*[^*\n]+\*\*|`[^`\n]+`)")
 
 
@@ -189,6 +190,7 @@ class Visor:
         self.thumbnails = {}
         self.fonts = {}
         self.conversations = {}
+        self.archive_open = False
         self.hover = None
         families = set(tkfont.families(root))
         self.sans = "Inter" if "Inter" in families else "DejaVu Sans"
@@ -234,6 +236,7 @@ class Visor:
         self._icon()
         self.apply_chat_layout()
         root.bind("<Configure>", self.resize_chat, add="+")
+        store.prune()
         self.refresh_sessions()
         saved_session = store.setting("session")
         if saved_session in [entry['session'] for entry in self.sessions]:
@@ -263,6 +266,7 @@ class Visor:
         root.after(50, self.poll_events)
         root.after(900, self.watch)
         root.after(5000, self.tick)
+        root.after(24 * 3600 * 1000, self.prune)
 
     def px(self, value):
         return round(value * self.factor)
@@ -638,6 +642,7 @@ class Visor:
         if self.browsing:
             self.history_view.pack_forget()
             self.browser_view.pack(fill="both", expand=True)
+            self.archive_open = False
             self.filter_var.set("")  # also fills the list
             self.filter_entry.focus_set()
         else:
@@ -651,32 +656,52 @@ class Visor:
             child.destroy()
         self.browser_rows, self.hover = [], None
         words = self.filter_var.get().lower().split()
-        groups = {}
-        for row in self.sessions:
-            if all(word in f"{row['session']} {row['project']} {row['label']}".lower() for word in words):
+        found = [row for row in self.sessions
+                 if all(word in f"{row['session']} {row['project']} {row['label']}".lower() for word in words)]
+        # Archived: nothing new for some days (a run counts until its last line), and not the conversation on screen.
+        # The filter looks through them all the same: archived is out of the way, not gone.
+        quiet = time.time() - ARCHIVE_DAYS * 86400
+        archived = [] if words else [row for row in found if row["active"] < quiet and row["session"] != self.session]
+        recent = [row for row in found if row not in archived]
+        self.browser_title.configure(text=f"{self.t('conversations')}   {len(recent)}")
+
+        def fill(listed):
+            groups = {}
+            for row in listed:
                 groups.setdefault(row["project"], []).append(row)
-        self.browser_title.configure(text=f"{self.t('conversations')}   {sum(map(len, groups.values()))}")
-        for project, rows in groups.items():
-            grouped = len(rows) > 1
-            if grouped:
-                self._label(self.browser_frame, self.clip(project, self.px(SIDEBAR - 50), 8, "bold"), fg=MUTED, size=8,
-                            weight="bold", anchor="w").pack(fill="x", padx=16, pady=(14, 4))
-            for row in rows:
-                name = row["label"] or self.t("main_folder") if grouped else "  ·  ".join(filter(None, [project, row["label"]]))
-                figures = self.t("figures_one") if row["entries"] == 1 else self.t("figures_many", n=row["entries"])
-                widget = self._row(self.browser_canvas, self.browser_frame,
-                                   row["snapshot"] and self.thumbnail(row["snapshot"], self.px(44), self.px(32)),
-                                   name, f"{figures}  ·  {self.ago(row['updated'])}",
-                                   lambda value=row["session"]: self.pick_browser(value),
-                                   selected=row["session"] == self.session, indent=8 if grouped else 0)
-                self.browser_rows.append((row["session"], widget))
-        if not self.browser_rows:
+            for project, rows in groups.items():
+                grouped = len(rows) > 1
+                if grouped:
+                    self._label(self.browser_frame, self.clip(project, self.px(SIDEBAR - 50), 8, "bold"), fg=MUTED, size=8,
+                                weight="bold", anchor="w").pack(fill="x", padx=16, pady=(14, 4))
+                for row in rows:
+                    name = row["label"] or self.t("main_folder") if grouped else "  ·  ".join(filter(None, [project, row["label"]]))
+                    figures = self.t("figures_one") if row["entries"] == 1 else self.t("figures_many", n=row["entries"])
+                    widget = self._row(self.browser_canvas, self.browser_frame,
+                                       row["snapshot"] and self.thumbnail(row["snapshot"], self.px(44), self.px(32)),
+                                       name, f"{figures}  ·  {self.ago(row['updated'])}",
+                                       lambda value=row["session"]: self.pick_browser(value),
+                                       selected=row["session"] == self.session, indent=8 if grouped else 0)
+                    self.browser_rows.append((row["session"], widget))
+        fill(recent)
+        if archived:
+            tk.Frame(self.browser_frame, height=1, bg=LINE).pack(fill="x", padx=12, pady=(14, 0))
+            self.archive_button = self._chip(self.browser_frame, f"{self.t('archived')}   {len(archived)}   {'▾' if self.archive_open else '▸'}",
+                                             self.toggle_archive)
+            self.archive_button.pack(anchor="w", padx=12, pady=(10, 4))
+            if self.archive_open:
+                fill(archived)
+        if not self.browser_rows and not archived:
             self._label(self.browser_frame, self.t("no_match") if self.sessions else self.t("no_projects"),
                         fg=MUTED, size=9).pack(anchor="w", padx=20, pady=12)
         # The keyboard starts on the conversation being shown, or on the best match while filtering.
         shown = [index for index, (session, _) in enumerate(self.browser_rows) if session == self.session]
         self.browser_index = shown[0] if shown and not words else 0
         self.move_browser(0)
+
+    def toggle_archive(self):
+        self.archive_open = not self.archive_open
+        self.fill_browser()
 
     def move_browser(self, direction):
         if self.browser_rows:
@@ -841,6 +866,23 @@ class Visor:
         elif self.current:
             self.clear_view()  # nothing of this project in the chosen period
         self.new_button.pack_forget()
+
+    def prune(self):
+        """Once a day while the window stays open (and when it opens), entries past their days are deleted."""
+        try:
+            if self.store.prune():
+                self.refresh_sessions()
+                if self.sessions and self.session not in [row["session"] for row in self.sessions]:
+                    self.select_session(self.sessions[0]["session"])
+                    return
+                self.refresh_history()
+                if self.current and not any(entry(item) == entry(self.current) for item in self.items):
+                    if self.items:
+                        self.select(self.items[0])
+                    else:
+                        self.clear_view()
+        finally:
+            self.root.after(24 * 3600 * 1000, self.prune)
 
     def clear_view(self):
         """Nothing of this project falls in the chosen period: show an empty canvas, not another project's image."""

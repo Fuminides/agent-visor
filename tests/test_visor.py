@@ -275,6 +275,44 @@ class StorageTests(unittest.TestCase):
         self.assertEqual((row["count"], row["entries"]), (4, 2))  # the deck is one entry
         self.assertEqual(row["snapshot"], self.store.history("Study / comparison")[0]["snapshot"])
 
+    def test_prune_deletes_old_entries_with_their_files_and_chats(self):
+        old = self.store.ingest([str(self.source)], "study")[0]
+        deck = self.store.ingest([str(self.source), str(self.source)], "study", deck=True)
+        kept = self.store.ingest([str(self.source)], "study")[0]
+        thread = self.store.new_thread(old["id"])
+        self.store.add_message(thread["id"], "user", "why?")
+        done, going, last = (self.store.track(f"/tmp/{name}.log", "study") for name in ("done", "going", "last"))
+        long_ago = time.time() - 40 * 86400
+        with self.store.connect() as conn:
+            conn.execute("UPDATE images SET created=? WHERE id=? OR deck=?", (long_ago, old["id"], deck[0]["deck"]))
+            conn.execute("UPDATE runs SET updated=?, closed=(id=?) WHERE id IN (?,?)", (long_ago, done["id"], done["id"], going["id"]))
+        points = self.store.directory / "points"
+        points.mkdir()
+        for name, moment in (("old.png", long_ago), ("new.png", time.time())):
+            (points / name).write_bytes(b"")
+            os.utime(points / name, (moment, moment))
+        self.assertEqual(self.store.prune(), 3)  # the figure, the presentation and the finished run
+        self.assertEqual([row["id"] for row in self.store.history()], [kept["id"]])
+        self.assertEqual({path.name for path in self.store.assets.iterdir()}, {f"{kept['id']}.png", f"{kept['id']}.thumb.png"})
+        self.assertEqual({run["id"] for run in self.store.runs()}, {going["id"], last["id"]})  # a run still followed stays
+        self.assertIsNone(self.store.thread(old["id"]))
+        self.assertEqual(self.store.messages(thread["id"]), [])
+        self.assertEqual([path.name for path in points.iterdir()], ["new.png"])
+        # The newest figure and the newest run stay however old they are.
+        with self.store.connect() as conn:
+            conn.execute("UPDATE images SET created=?", (long_ago,))
+            conn.execute("UPDATE runs SET updated=?, closed=1", (long_ago,))
+        self.assertEqual(self.store.prune(), 1)
+        self.assertEqual([row["id"] for row in self.store.history()], [kept["id"]])
+        self.assertEqual([run["id"] for run in self.store.runs()], [last["id"]])
+        # A database copied to another folder deletes its own files only, never those its rows still point at.
+        copy = Store(self.directory / "copy")
+        with copy.connect() as conn:
+            conn.executemany("INSERT INTO images (id,session,title,caption,source,snapshot,width,height,created,signature) "
+                             "VALUES (?,'study','','','',?,1,1,?,'')", [("a" * 32, kept["snapshot"], long_ago), ("b" * 32, "", time.time())])
+        self.assertEqual(copy.prune(), 1)
+        self.assertTrue(Path(kept["snapshot"]).exists())
+
     def test_no_session_basename_collision(self):
         with patch.dict(os.environ, {}, clear=True), patch("pathlib.Path.cwd", return_value=Path("/a/project")):
             self.assertEqual(default_session(), "/a/project")
@@ -1489,6 +1527,51 @@ for event in [{{"type": "system", "subtype": "init", "session_id": "fork-123"}},
                 app.set_language("es")
                 root.update()
                 self.assertTrue(app.history_view.winfo_ismapped())
+            finally:
+                root.destroy()
+
+    def test_quiet_conversations_are_archived_and_old_entries_leave_the_window(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory:
+            directory = Path(directory)
+            image, log = directory / "plot.png", directory / "run.log"
+            Image.new("RGB", (300, 200), "white").save(image)
+            log.write_text("[1/9] loss=0.5\n")
+            store = Store(directory / "data")
+            for session in ("Shown", "Training", "Quiet", "Fresh"):
+                store.ingest([str(image)], session)
+            store.track(str(log), "Training")
+            store.set_setting("session", "Shown")
+            with store.connect() as conn:
+                conn.execute("UPDATE images SET created=created-4*86400 WHERE session!='Fresh'")
+                conn.execute("UPDATE runs SET created=created-4*86400")
+            root = tk.Tk()
+            try:
+                app = Visor(root, store)
+                root.update()
+                app.session_button.invoke()
+                root.update()
+                # Out of the list: nothing new in days, not even a line of a run, and not the conversation on screen.
+                self.assertEqual({session for session, _ in app.browser_rows}, {"Fresh", "Training", "Shown"})
+                self.assertIn("1", app.archive_button.cget("text"))
+                app.archive_button.invoke()
+                self.assertEqual([session for session, _ in app.browser_rows][-1], "Quiet")
+                app.archive_button.invoke()
+                app.filter_var.set("qui")  # the filter still finds it
+                self.assertEqual([session for session, _ in app.browser_rows], ["Quiet"])
+                app.pick_browser()
+                app.toggle_browser()
+                self.assertIn("Quiet", [session for session, _ in app.browser_rows])  # shown now, so listed
+                app.toggle_browser()
+                # Past its days, the entry on screen goes and the window moves to what is left.
+                with store.connect() as conn:
+                    conn.execute("UPDATE images SET created=created-40*86400 WHERE session='Quiet'")
+                app.prune()
+                settle(app)
+                self.assertEqual(app.session, "Fresh")
+                self.assertEqual(app.current["session"], "Fresh")
+                self.assertNotIn("Quiet", [row["session"] for row in app.sessions])
             finally:
                 root.destroy()
 
