@@ -84,8 +84,15 @@ TEXT = {
         "chat_no_session": "This image has no recorded agent session. Show it again from Codex or Claude Code to connect it.",
         "chat_fork": "Fork of session {id} · read-only (Read, Grep, Glob). The original session does not change.",
         "chat_hint": "Ask anything about this figure. The first question creates the fork. "
-                     "Right-click the figure to point at a specific element, or drag with the right button to frame a region.",
+                     "Right-click the figure to point at a specific element, or drag with the right button to frame a region. "
+                     "To ask for changes, Copy command opens the session that made it.",
         "copied": "Copied, to continue in the terminal:\n{line}",
+        "session_open": "The session that made this is still open in a terminal: {name} ({state}). "
+                        "Give your feedback there. Nothing was copied: resuming it again would make two programs write the same conversation.",
+        "copied_new": "The conversation that made this is no longer on this computer. Copied a command that starts "
+                      "a new one in {folder} and tells it which entry you want to comment on.",
+        "session_busy": "working",
+        "session_idle": "waiting for you",
         "stopped": "Stopped.",
         "working": "●  Working in the fork…",
         "exit_code": "claude exited with code {code}.",
@@ -106,7 +113,7 @@ TEXT = {
         "notes": "NOTES",
         "live": "LIVE",
         "chat_no_session_run": "This run has no recorded agent session. Track it again from Codex or Claude Code to connect it.",
-        "chat_hint_run": "Ask anything about this run. The first question creates the fork.",
+        "chat_hint_run": "Ask anything about this run. The first question creates the fork. To ask for changes, Copy command opens the session that made it.",
     },
     "es": {
         'ask_title': 'Conectar con otro ordenador',
@@ -188,8 +195,15 @@ TEXT = {
         "chat_no_session": "Esta imagen no tiene una sesión registrada. Muéstrala otra vez desde Codex o Claude Code para conectarla.",
         "chat_fork": "Bifurcación de la sesión {id} · solo lectura (Read, Grep, Glob). La sesión original no cambia.",
         "chat_hint": "Pregunta lo que quieras sobre esta figura. La primera pregunta crea la bifurcación. "
-                     "Con clic derecho en la figura señalas un elemento concreto; arrastrando con el botón derecho enmarcas una región.",
+                     "Con clic derecho en la figura señalas un elemento concreto; arrastrando con el botón derecho enmarcas una región. "
+                     "Para pedir cambios, Copiar comando abre la sesión que la hizo.",
         "copied": "Copiado para seguir en la terminal:\n{line}",
+        "session_open": "La sesión que hizo esto sigue abierta en una terminal: {name} ({state}). "
+                        "Dale tus comentarios allí. No se ha copiado nada: reanudarla otra vez haría que dos programas escribieran la misma conversación.",
+        "copied_new": "La conversación que hizo esto ya no está en este ordenador. Se ha copiado un comando que abre "
+                      "una nueva en {folder} y le dice sobre qué entrada quieres comentar.",
+        "session_busy": "trabajando",
+        "session_idle": "esperándote",
         "stopped": "Detenido.",
         "working": "●  Trabajando en la bifurcación…",
         "exit_code": "claude terminó con código {code}.",
@@ -210,7 +224,7 @@ TEXT = {
         "notes": "NOTAS",
         "live": "EN VIVO",
         "chat_no_session_run": "Esta ejecución no tiene una sesión registrada. Síguela otra vez desde Codex o Claude Code para conectarla.",
-        "chat_hint_run": "Pregunta lo que quieras sobre esta ejecución. La primera pregunta crea la bifurcación.",
+        "chat_hint_run": "Pregunta lo que quieras sobre esta ejecución. La primera pregunta crea la bifurcación. Para pedir cambios, Copiar comando abre la sesión que la hizo.",
     },
 }
 

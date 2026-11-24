@@ -56,6 +56,28 @@ def session_cwd(session_id, fallback=None):
     return fallback if fallback and Path(fallback).is_dir() else str(Path.home())
 
 
+def recorded(session_id):
+    """Whether Claude Code still keeps this session's conversation on this computer (it deletes old ones)."""
+    return any(projects_dir().glob(f"*/{session_id}.jsonl"))
+
+
+def running(session_id):
+    """The Claude Code process that has this session open right now, or None. Claude Code keeps one file per
+    running process in its `sessions` folder (not a documented interface: without it, the session counts as closed)."""
+    for path in projects_dir().parent.glob("sessions/*.json"):
+        try:
+            found = json.loads(path.read_text())
+            if found.get("sessionId") != session_id:
+                continue
+            # Field 22 of /proc/<pid>/stat is when the process started: a recycled pid has another value.
+            started = Path(f"/proc/{found['pid']}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        except (OSError, ValueError, KeyError, IndexError, AttributeError):
+            continue
+        if started == str(found.get("procStart", started)):
+            return found
+    return None
+
+
 # Set by the agent session that happened to start Visor; they would tie the fork to that session.
 SESSION_VARIABLES = {"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_SOCKET",
                      "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED",
@@ -178,6 +200,18 @@ def prompt(question, item, first, point=None, live=False):
             "read and search (Read, Grep, Glob): you cannot edit files or run commands. Answer in the user's language, "
             "briefly and with little Markdown, because the window shows plain text.\n\n"
             f"{question}")
+
+
+def fresh_prompt(item):
+    """Opening message of a new session about an entry whose own conversation no longer exists."""
+    if item.get("kind") == "run":
+        what = f"the run \"{item['title']}\" (its progress file is {item['source']})"
+    else:
+        what = f"the figure \"{item['title']}\" ({item['source']}; the copy I am looking at is {item['snapshot']})"
+        if item.get("deck"):
+            what += f", slide {item['page']} of {item['pages']}"
+    return (f"I want to give feedback on {what}, shown in Visor. The conversation that made it is no longer available, "
+            "so find in this project what produced it, look at it, and then ask me what to change.")
 
 
 def events(line):

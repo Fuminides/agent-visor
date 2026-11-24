@@ -1701,7 +1701,8 @@ class Visor:
         elif not running:
             self.working_label.pack_forget()
         self.chat_input.configure(state="normal" if usable else "disabled")
-        self.copy_button.configure(state="normal" if live or self.thread and self.thread["fork"] else "disabled")
+        # Codex copies the thread of the chosen mode; Claude Code always has the session that made the entry.
+        self.copy_button.configure(state="normal" if live or not is_codex or self.thread and self.thread["fork"] else "disabled")
 
     def chat_return(self, event):
         if event.state & 0x1:  # Shift+Enter keeps a new line
@@ -1718,20 +1719,32 @@ class Visor:
             self.load_chat()
 
     def copy_command(self):
+        status = None
         if self.current and self.current.get("agent_provider") == "codex":
             target = self.current["agent_session"] if self.chat_mode == "live" else self.thread["fork"] if self.thread else None
             if not target:
                 return
             path = self.current.get("agent_socket") or codex.control_socket()
             line = f"codex --remote {shlex.quote('unix://' + path)} resume {shlex.quote(target)}"
-        elif self.thread and self.thread["fork"] and self.current:
-            cwd = chat.session_cwd(self.current["agent_session"], self.current.get("agent_cwd"))
-            line = f"cd {shlex.quote(cwd)} && claude --resume {shlex.quote(self.thread['fork'])}"
+        elif self.current and self.current.get("agent_session"):
+            # The session that made the entry, so feedback reaches the work itself and not the read-only fork.
+            session = self.current["agent_session"]
+            found = chat.running(session)
+            if found:  # resuming it a second time would make two processes write one conversation
+                state = self.t("session_idle" if found.get("status") == "idle" else "session_busy")
+                self.chat_status.configure(text=self.t("session_open", name=found.get("name") or session[:8], state=state))
+                return
+            cwd = chat.session_cwd(session, self.current.get("agent_cwd"))
+            if chat.recorded(session):
+                line = f"cd {shlex.quote(cwd)} && claude --resume {shlex.quote(session)}"
+            else:  # its conversation is gone: a new session in the same folder, told which entry this is
+                line = f"cd {shlex.quote(cwd)} && claude {shlex.quote(chat.fresh_prompt(self.current))}"
+                status = self.t("copied_new", folder=cwd)
         else:
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(line)
-        self.chat_status.configure(text=self.t("copied", line=line))
+        self.chat_status.configure(text=status or self.t("copied", line=line))
 
     def send_or_stop(self):
         item = self.current

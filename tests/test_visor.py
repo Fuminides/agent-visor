@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import shlex
 import signal
 import socket
 import sqlite3
@@ -671,6 +672,27 @@ class ChatTests(unittest.TestCase):
                 self.assertEqual(chat.session_cwd(sid, "/nonexistent"), directory)
                 self.assertEqual(chat.session_cwd("00000000-0000-0000-0000-000000000000", directory), directory)
 
+    def test_a_session_counts_as_open_only_while_its_process_lives(self):
+        sid = "31cde43d-3856-47e7-990f-9d87748f1e6d"
+        started = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19]
+        with tempfile.TemporaryDirectory(prefix="av-chat-") as directory:
+            sessions = Path(directory) / "sessions"
+            sessions.mkdir()
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": directory}):
+                self.assertIsNone(chat.running(sid))
+                (sessions / "broken.json").write_text("not json")
+                record = sessions / f"{os.getpid()}.json"
+                record.write_text(json.dumps({"pid": os.getpid(), "sessionId": sid, "procStart": started, "name": "study-a1"}))
+                self.assertEqual(chat.running(sid)["name"], "study-a1")
+                self.assertIsNone(chat.running("00000000-0000-0000-0000-000000000000"))
+                # The same pid started at another time is a different program: the session has closed.
+                record.write_text(json.dumps({"pid": os.getpid(), "sessionId": sid, "procStart": "1"}))
+                self.assertIsNone(chat.running(sid))
+                finished = subprocess.Popen([sys.executable, "-c", "pass"])
+                finished.wait()
+                record.write_text(json.dumps({"pid": finished.pid, "sessionId": sid}))
+                self.assertIsNone(chat.running(sid))
+
 
 class StartupTests(unittest.TestCase):
     def test_status_and_stop_do_not_report_closed_when_the_owner_is_unresponsive(self):
@@ -1258,6 +1280,57 @@ class WindowBehaviorTests(unittest.TestCase):
                 self.assertFalse(app.slide_bar.winfo_ismapped())
             finally:
                 root.destroy()
+
+    def test_copy_command_opens_the_session_that_made_the_figure(self):
+        import tkinter as tk
+        from agent_visor.app import Visor
+        sid = "31cde43d-3856-47e7-990f-9d87748f1e6d"
+        with tempfile.TemporaryDirectory(prefix="av-ui-") as directory, patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": directory}):
+            directory = Path(directory)
+            image = directory / "plot.png"
+            Image.new("RGB", (300, 200), "white").save(image)
+            store = Store(directory / "data")
+            item = store.ingest([str(image)], "Chat", title="Loss \"A\"", agent_session=sid, agent_cwd=str(directory))[0]
+            transcript = directory / "projects/-some-project" / f"{sid}.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(json.dumps({"cwd": str(directory)}) + "\n")
+            root = tk.Tk()
+            try:
+                app = Visor(root, store)
+                app.toggle_chat()
+                root.update()
+                # No question has been asked, so there is no fork: the command is for the original session.
+                self.assertIsNone(app.thread)
+                self.assertEqual(str(app.copy_button.cget("state")), "normal")
+                app.copy_button.invoke()
+                self.assertEqual(root.clipboard_get(), f"cd {directory} && claude --resume {sid}")
+                self.assertIn(sid, app.chat_status.cget("text"))
+                # Once Claude Code has deleted that conversation, a new session in its folder is told about the figure.
+                transcript.unlink()
+                app.copy_button.invoke()
+                folder, prompt = shlex.split(root.clipboard_get().replace(" && claude ", " "))[1:]
+                self.assertEqual(folder, str(directory))
+                self.assertEqual(prompt, chat.fresh_prompt(item))
+                self.assertIn('the figure "Loss "A""', prompt)
+                self.assertIn(item["snapshot"], prompt)
+                self.assertIn("no longer on this computer", app.chat_status.cget("text"))
+                # While that session is open in a terminal, a second resume is not offered: the panel names it.
+                root.clipboard_clear()
+                root.clipboard_append("kept")
+                started = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19]
+                (directory / "sessions").mkdir()
+                (directory / "sessions" / "1.json").write_text(json.dumps(
+                    {"pid": os.getpid(), "sessionId": sid, "procStart": started, "name": "study-a1", "status": "idle"}))
+                app.copy_button.invoke()
+                self.assertEqual(root.clipboard_get(), "kept")
+                self.assertIn("study-a1 (waiting for you)", app.chat_status.cget("text"))
+                app.close()
+            finally:
+                try:
+                    if root.winfo_exists():
+                        root.destroy()
+                except tk.TclError:
+                    pass
 
     def test_chat_forks_once_then_continues_and_keys_ignore_typing(self):
         import tkinter as tk
