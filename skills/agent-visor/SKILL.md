@@ -52,7 +52,8 @@ A tqdm bar over the outer loop is read too. `step`/`total` (the `k/N`) must coun
 - Read the command's answer: `Following · step 3/12 · curves: acc, loss` confirms the lines are understood. `no progress line yet` on a log that already has output means the format is wrong: fix the print.
 - Add what the user should know as it happens with `visor track <same file> --note "…"`: a divergence, a restart, the final result. The same file updates the same entry; notes are dated and listed newest first.
 - A run on another machine: `visor track host:/abs/path/run.log`, with a host name from the user's ssh config. It is read over `ssh` in batch mode every 10 seconds, so it must be reachable from this computer without a password prompt.
-- Relaunching into the same file (truncating it) starts a new entry by itself and keeps the old curves.
+- Relaunching into the same file (truncating it) starts a new entry by itself and keeps the old curves, drawn faintly behind the new ones: reuse the file when the user should compare a launch with the one before.
+- A run whose file stays silent for far longer than its steps take is shown as stalled, so keep the log moving on long steps (any complete line counts).
 - The page shows what the file says. For the final figures (comparisons, tables, plots across runs) still use `visor show`.
 
 ## Questions from the viewer

@@ -428,6 +428,13 @@ class Store:
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         return self._run(row) if row else None
 
+    def previous_run(self, run):
+        """The launch that wrote to the same file before this one, or None."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE session=? AND source=? AND created<? ORDER BY created DESC LIMIT 1",
+                               (run["session"], run["source"], run["created"])).fetchone()
+        return self._run(row) if row else None
+
     @staticmethod
     def _run(row):
         # kind tells a run from an image wherever history entries are handled together.

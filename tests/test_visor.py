@@ -475,6 +475,8 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.store.track(str(self.log), "study")["id"], second["id"])
         self.assertEqual([run["id"] for run in self.store.runs("study")], [second["id"], first["id"]])
         self.assertEqual([run["id"] for run in self.store.runs(following=True)], [second["id"]])
+        self.assertEqual(self.store.previous_run(second)["id"], first["id"])
+        self.assertIsNone(self.store.previous_run(kept))
         for index in range(25):
             self.store.add_note(second["id"], f"note {index}")
         self.assertEqual([note for _, note in self.store.run(second["id"])["notes"]][::19], ["note 5", "note 24"])
@@ -505,6 +507,30 @@ class RunTests(unittest.TestCase):
         self.assertEqual(run["closed"], 1)
         self.assertEqual(self.store.track(str(slow), "study")["closed"], 0)  # asking again follows it again
         self.assertEqual(runs.advance(self.store, "missing"), (None, False))
+
+    def test_a_run_silent_for_far_longer_than_its_steps_take_is_stalled_until_it_speaks_again(self):
+        run = self.follow("[1/10] loss=1\n")
+        for step, moment in ((2, 1000.0), (3, 1010.0), (4, 1020.0)):  # a step every 10 s
+            with self.log.open("a") as handle:
+                handle.write(f"[{step}/10] loss=1\n")
+            with patch("agent_visor.runs.time.time", return_value=moment):
+                run, _ = runs.advance(self.store, run["id"])
+        self.assertEqual(runs.state(run, 1020.0 + runs.STALL_MIN), "running")  # never before the shortest wait
+        self.assertEqual(runs.state(run, 1021.0 + runs.STALL_MIN), "stalled")
+        run["data"]["seen"] = [[0.0, 2], [1000.0, 3], [2000.0, 4]]  # a step every 1000 s
+        self.assertEqual(runs.state(run, 1020.0 + 4000), "running")
+        self.assertEqual(runs.state(run, 1020.0 + 5001), "stalled")
+        self.assertEqual(run["closed"], 0)  # still followed: the next line sets it running again
+        with self.log.open("a") as handle:
+            handle.write("[5/10] loss=1\n")
+        with patch("agent_visor.runs.time.time", return_value=9000.0):
+            run, _ = runs.advance(self.store, run["id"])
+        self.assertEqual(runs.state(run, 9001.0), "running")
+        # Without a measured pace it takes much longer, and a file with no progress line yet only waits.
+        blind = self.follow("[1/10] loss=1\n")
+        self.assertEqual(runs.state(blind, blind["updated"] + runs.STALL_BLIND - 1), "running")
+        self.assertEqual(runs.state(blind, blind["updated"] + runs.STALL_BLIND + 1), "stalled")
+        self.assertEqual(runs.state(self.follow("starting\n"), time.time() + 10 * runs.STALL_BLIND), "waiting")
 
     def test_a_file_on_another_machine_is_read_over_ssh_without_prompts(self):
         calls = []
@@ -754,6 +780,27 @@ class RunWorkerTests(unittest.TestCase):
         events = [app.events.get_nowait()[0] for _ in range(app.events.qsize())]
         self.assertEqual([event["action"] for event in events], ["notice", "run", "run_end"])
         self.assertFalse(events[-1]["failed"])
+
+    def test_the_end_and_a_stall_are_notified_once_and_only_when_asked(self):
+        from agent_visor.app import Visor
+
+        def looks(*states):
+            return [({"id": "run-id", "title": "PPO", "source": "/run.log", "error": None, "updated": 0,
+                      "closed": index == len(states) - 1, "state": state}, True)
+                    for index, state in enumerate(states)]
+        app = Visor.__new__(Visor)
+        app.closing, app.language, app.store = False, "en", Mock()
+        for asked, states, expected in ((True, ("done", "done", "done"), []),  # already finished at the first look
+                                        (True, ("running", "done", "done", "done"), ["Finished at"]),
+                                        (True, ("running", "stalled", "running", "stalled", "running", "running"), ["No new line for"]),
+                                        (False, ("running", "done", "done"), [])):
+            app.events, app.notifying = queue.Queue(), asked
+            with patch("agent_visor.app.runs.advance", side_effect=looks(*states)), patch("agent_visor.app.time.sleep"), \
+                    patch("agent_visor.app.runs.state", side_effect=lambda run: run["state"]), patch("agent_visor.app.notify") as notify:
+                app.run_worker("run-id")
+            self.assertEqual([call.args[0] for call in notify.call_args_list], ["PPO"] * len(expected))
+            for call, text in zip(notify.call_args_list, expected):
+                self.assertIn(text, call.args[1])
 
     def test_database_retry_stops_when_window_closes(self):
         from agent_visor.app import Visor
@@ -1217,6 +1264,24 @@ class WindowBehaviorTests(unittest.TestCase):
                 app.dispatch({"action": "run", "id": relaunched["id"]})
                 root.update()
                 self.assertEqual((app.current["id"], len(app.items)), (relaunched["id"], 3))
+                # The launch before it lies behind its curves, on the steps both share; a click on a chart
+                # turns its scale logarithmic, and the choice is kept.
+                self.assertEqual(app.earlier["id"], run["id"])
+                self.assertIn("lanzamiento anterior", app.detail_label.cget("text"))
+                with patch("agent_visor.app.shutil.which", return_value="/usr/bin/notify-send"):
+                    app.draw()
+                chart = app.run_plots[0]
+                self.assertEqual((chart["name"], round(chart["across"](40))), ("reward", round(chart["plot"][2])))
+                app.pan_start(type("Event", (), {"x": round(chart["plot"][0] + 5), "y": round(chart["plot"][1] + 5)})())
+                self.assertIn("reward  ·  log", [app.canvas.itemcget(item, "text") for item in app.canvas.find_all()
+                                                 if app.canvas.type(item) == "text"])
+                self.assertEqual((store.setting("log_scale"), app.run_plots[0]["up"](10) < app.run_plots[0]["up"](1)), (["reward"], True))
+                # The page of a run offers to notify its end; nobody is notified until that is ticked.
+                self.assertTrue(app.run_bar.winfo_manager())
+                self.assertFalse(app.notifying)
+                app.notify.set(True)
+                app.notify_changed()
+                self.assertEqual((app.notifying, store.setting("notify")), (True, True))
                 app.dispatch({"action": "run_end", "id": relaunched["id"], "started": run["id"], "failed": True})
                 self.assertNotIn(run["id"], app.following)
                 # A conversation that only holds a run appears in the browser without a thumbnail.

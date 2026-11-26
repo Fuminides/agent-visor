@@ -56,7 +56,11 @@ The script needs no library. A line counts when it has one of these forms; every
 
 `host:/absolute/path` reads the file with `ssh host` every 10 seconds, using your ssh configuration in batch mode: it never asks for a password, so the host must accept your key. While the host cannot be reached the page says so, and it catches up when the connection is back.
 
-When a new launch writes to the same file from the start, the earlier run stays in the history as it was and the new one gets its own entry. A run stops being followed one minute after its last step, or after 12 hours without a new line; `visor track` on it follows it again. Point at a curve to read the value at a step, and scroll with the wheel when the page is longer than the window. **Ask** works on a run as on a figure: the fork gets what Visor has read from the file.
+When a new launch writes to the same file from the start, the earlier run stays in the history as it was and the new one gets its own entry, whose charts draw the earlier launch as a faint line behind each curve, on the current run's scale. A run stops being followed one minute after its last step, or after 12 hours without a new line; `visor track` on it follows it again.
+
+A run that has not finished and whose file gains no line for five times its usual wait between steps (and at least 2 minutes; 30 minutes while that wait has not been measured) is shown as **stalled**, with how long it has been silent: it may have died. It is still followed, and goes back to running with its next line. Tick **Notify when a run ends or stalls** under the page to get a desktop notification (`notify-send`) when a run finishes and the first time it stalls. It is off by default, and applies to every run.
+
+Point at a curve to read the value at a step, click a chart to switch it between a linear and a logarithmic scale (remembered per metric name; a metric with values of zero or less stays linear), and scroll with the wheel when the page is longer than the window. **Ask** works on a run as on a figure: the fork gets what Visor has read from the file.
 
 ## Ask the session
 

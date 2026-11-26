@@ -27,6 +27,9 @@ MAX_SERIES = 12
 MAX_INFO = 24
 DONE_GRACE = 60  # a finished run is followed this long, for lines written after the last step
 QUIET_LIMIT = 12 * 3600  # an unfinished run that says nothing for this long is no longer followed
+STALL_FACTOR = 5  # an unfinished run is stalled after this many times its usual wait between steps without a line,
+STALL_MIN = 120  # and never before this many seconds;
+STALL_BLIND = 1800  # while that wait has not been measured, after this many seconds
 LOCKS = {}
 SHARED = {}  # host: ssh options that reuse a connection the window keeps open to it (see mirror.py)
 
@@ -135,15 +138,26 @@ def finished(data):
     return bool(data["total"]) and data["step"] is not None and data["step"] >= data["total"]
 
 
-def state(run):
-    """running, waiting (nothing read yet), done, stopped (no longer followed) or error (the file cannot be read)."""
+def stalled(run, now=None):
+    """Whether the file has gained nothing for far longer than a step takes: the run may have died.
+    The wait between steps is the one seen while following."""
+    seen = run["data"]["seen"]
+    wait = (seen[-1][0] - seen[0][0]) / (len(seen) - 1) if len(seen) > 1 else None
+    return (now or time.time()) - run["updated"] > (max(STALL_MIN, STALL_FACTOR * wait) if wait else STALL_BLIND)
+
+
+def state(run, now=None):
+    """running, waiting (nothing read yet), done, stalled (still followed, but silent for too long),
+    stopped (no longer followed) or error (the file cannot be read)."""
     if finished(run["data"]):
         return "done"
     if run["error"]:
         return "error"
     if run["closed"]:
         return "stopped"
-    return "running" if run["data"]["lines"] else "waiting"
+    if not run["data"]["lines"]:
+        return "waiting"
+    return "stalled" if stalled(run, now) else "running"
 
 
 def advance(store, run_id):

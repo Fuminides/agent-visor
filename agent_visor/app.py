@@ -11,6 +11,7 @@ from pathlib import Path
 import queue
 import re
 import shlex
+import shutil
 import socketserver
 import sqlite3
 import subprocess
@@ -163,6 +164,23 @@ def figure(value):
     return f"{value:.4g}"
 
 
+def decades(low, high):
+    """Powers of ten that span low..high, both above zero: the marks of a logarithmic scale, six at most."""
+    first, last = math.floor(math.log10(low)), math.ceil(math.log10(high))
+    last += first == last
+    step = -(-(last - first) // 5)
+    return [10.0 ** power for power in range(first, last + step, step)]
+
+
+def notify(title, text):
+    """A desktop notification; nothing happens where the desktop has none."""
+    try:
+        subprocess.run(["notify-send", "-a", "Visor", title, text], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def ticks(low, high):
     """Three to five round values, evenly spaced, that span low..high."""
     rough = ((high - low) or abs(high) or 1) / 3
@@ -221,6 +239,10 @@ class Visor:
         self.run_scroll = 0
         self.run_height = 0
         self.run_plots = []
+        self.earlier = None  # the launch that wrote to the shown run's file before it; its curves are drawn behind
+        self.log_scale = set(store.setting("log_scale", []))  # the metrics drawn on a logarithmic scale
+        self.notify = tk.BooleanVar(value=store.setting("notify", False))
+        self.notifying = self.notify.get()  # read by the threads that follow the runs
         self.pointer = None
         self.language = store.setting("language", "en")
         self.theme = store.setting("theme", "sand")
@@ -500,6 +522,10 @@ class Visor:
         self._button(self.zoom_bar, "+", lambda: self.zoom(1.2), padx=10, pady=5).pack(side="left")
         self._button(self.zoom_bar, "1:1", self.actual_size, padx=10, pady=5).pack(side="left", padx=4)
         self._button(self.zoom_bar, self.t("fit"), self.set_fit, padx=10, pady=5).pack(side="left")
+        self.run_bar = tk.Frame(controls, bg=BG)  # takes the place of the zoom buttons on the page of a run
+        tk.Checkbutton(self.run_bar, text=self.t("run_notify"), variable=self.notify, command=self.notify_changed,
+            bg=BG, fg=INK, selectcolor=FIELD, activebackground=BG, activeforeground=INK,
+            font=(self.sans, 9), highlightthickness=2, highlightbackground=BG, highlightcolor=INK, cursor="hand2").pack()
         self.detail_label = self._label(main, self.t("idle_detail"), fg=MUTED, size=8, anchor="w")
         # Bottom rows are laid out before the canvas, so a short window shrinks the figure, not them.
         self.detail_label.pack(side="bottom", fill="x", padx=30, pady=(0, 12), before=self.canvas)
@@ -986,9 +1012,11 @@ class Visor:
         self.title_label.configure(text=item["title"])
         self.root.title(f"{item['title']} · Visor")
         source = Path(item["source"])
+        self.earlier = self.store.previous_run(item) if run else None
         if run:
             self.caption_label.configure(text=item["source"].replace(str(Path.home()), "~", 1))
-            self.detail_label.configure(text=self.t("run_detail"))
+            self.detail_label.configure(text=self.t("run_detail") + (
+                "  " + self.t("run_earlier", clock=self.clock(self.earlier["created"])) if self.earlier else ""))
         else:
             self.caption_label.configure(text=item["caption"] or source.name)
             # File name before folder, so a long path truncates the folder and not the name.
@@ -1059,8 +1087,11 @@ class Visor:
         width, height = canvas.winfo_width(), canvas.winfo_height()
         if is_run(self.current):
             self.zoom_bar.pack_forget()
+            if shutil.which("notify-send") and not self.run_bar.winfo_manager():
+                self.run_bar.pack(side="right")
             self.draw_run()
             return
+        self.run_bar.pack_forget()
         if not self.original:
             self.zoom_bar.pack_forget()
             if self.session and self.period != "all":
@@ -1166,6 +1197,7 @@ class Visor:
     def run_worker(self, started):
         """Off the Tk thread: the window only hears that a run has something new."""
         run_id, failed, database_error = started, True, None
+        was, told = None, set()  # the state at the last look; a run already finished or stalled at the first is not news
         try:
             while not self.closing:
                 try:
@@ -1185,6 +1217,12 @@ class Visor:
                     self.events.put(({"action": "run", "id": run_id}, None, None))
                 if run["closed"]:
                     break
+                state = runs.state(run)
+                if self.notifying and was not in (None, state) and state in ("done", "stalled") and (run_id, state) not in told:
+                    told.add((run_id, state))  # a run that stalls again and again is told once
+                    notify(run["title"], self.t("run_done_at", clock=self.clock(run["updated"])) if state == "done" else
+                           self.t("run_stalled", time=span(time.time() - run["updated"])))
+                was = state
                 # A file on another machine costs an ssh connection per look; one that cannot be read is retried slowly.
                 time.sleep(60 if run["error"] else 10 if runs.REMOTE.match(run["source"]) else 2)
             failed = False
@@ -1263,7 +1301,8 @@ class Visor:
         """The page of a live run: how far it is and how long is left, one chart per metric, the agent's notes.
         Tk's own lines are not antialiased, so every shape is painted on one image at 3x and reduced; the text is Tk's."""
         canvas, p, run = self.canvas, self.px, self.current
-        data, state, now = run["data"], runs.state(run), time.time()
+        now = time.time()
+        data, state = run["data"], runs.state(run, now)
         width, height = max(canvas.winfo_width(), 80), max(canvas.winfo_height(), 80)
         over = 2 if self.factor > 1.25 else 3
         sheet = Image.new("RGB", (width * over, height * over), STAGE)
@@ -1286,6 +1325,7 @@ class Visor:
         # How it is going: state, share done, the bar, time left.
         glyph, color, label = {"running": ("●", ACCENT_TEXT, self.t("run_running")), "waiting": ("○", MUTED, self.t("run_waiting")),
                                "done": ("✓", INK, self.t("run_done")), "error": ("⚠", ERROR, run["error"]),
+                               "stalled": ("⚠", ERROR, self.t("run_stalled", time=span(now - run["updated"]))),
                                "stopped": ("○", MUTED, self.t("run_stopped", time=span(now - run["updated"])))}[state]
         step, total = data["step"], data["total"]
         share = min(1, step / total) if step is not None and total else None
@@ -1311,7 +1351,7 @@ class Visor:
             pace = self.t("run_estimating") if left_for is None else self.t("run_left", time=span(left_for), clock=self.clock(now + left_for))
         else:
             pace = ""
-        age = "" if state in ("done", "waiting", "stopped") else self.t("run_updated", time=span(now - run["updated"]))
+        age = "" if state in ("done", "waiting", "stopped", "stalled") else self.t("run_updated", time=span(now - run["updated"]))
         if pace or age:
             room = inner - self.font(9).measure(age) - p(16)
             y = canvas.bbox(text(left + pad, y, pace or " ", 9, MUTED, wrap=room))[3]
@@ -1329,22 +1369,27 @@ class Visor:
         cell, tall = (right - left - gap * (columns - 1)) / columns, p(192)
         small = self.font(8)
         self.run_plots = []
+        earlier = self.earlier["data"]["series"] if self.earlier else {}
         for index, name in enumerate(names):
             points = data["series"][name]
+            low, high = min(value for _, value in points), max(value for _, value in points)
+            log = name in self.log_scale and low > 0
+            ghost = [point for point in earlier.get(name, []) if point[1] > 0 or not log]
             x0, y0 = left + (index % columns) * (cell + gap), y + (index // columns) * (tall + gap)
             card(x0, y0, x0 + cell, y0 + tall)
             latest = figure(points[-1][1])
-            text(x0 + p(16), y0 + p(15), self.clip(name, cell - p(48) - self.font(15, "bold").measure(latest), 9, "bold"), 9, MUTED, "bold")
+            text(x0 + p(16), y0 + p(15), self.clip(name + "  ·  log" * log, cell - p(48) - self.font(15, "bold").measure(latest), 9, "bold"), 9, MUTED, "bold")
             text(x0 + cell - p(16), y0 + p(10), latest, 15, weight="bold", anchor="ne")
-            scale = ticks(min(value for _, value in points), max(value for _, value in points))
-            first, last = min(at for at, _ in points), max(at for at, _ in points)
+            scale = decades(low, high) if log else ticks(low, high)
+            level = math.log10 if log else float
+            first, last = min(at for at, _ in points + ghost), max(at for at, _ in points + ghost)
             plot = (x0 + p(24) + max(small.measure(figure(value)) for value in scale), y0 + p(60), x0 + cell - p(22), y0 + tall - p(36))
 
             def across(at, plot=plot, first=first, last=last):
                 return plot[2] if last == first else plot[0] + (at - first) / (last - first) * (plot[2] - plot[0])
 
-            def up(value, plot=plot, low=scale[0], high=scale[-1]):
-                return plot[3] - (value - low) / (high - low) * (plot[3] - plot[1])
+            def up(value, plot=plot, low=level(scale[0]), high=level(scale[-1]), level=level):
+                return plot[3] - (level(value) - low) / (high - low) * (plot[3] - plot[1])
 
             for value in scale:
                 text(plot[0] - p(8), up(value), figure(value), 8, MUTED, anchor="e")
@@ -1352,9 +1397,16 @@ class Visor:
             if last != first:
                 text(plot[2], plot[3] + p(8), figure(last), 8, MUTED, anchor="ne")
 
-            def curve(points=points, plot=plot, scale=scale, across=across, up=up):
+            def curve(points=points, ghost=ghost, plot=plot, scale=scale, across=across, up=up):
                 for value in scale:
                     pen.line((plot[0] * over, up(value) * over, plot[2] * over, up(value) * over), fill=LINE, width=over)
+                if ghost and plot[2] > plot[0] and plot[3] > plot[1]:
+                    # The earlier launch is cut at the plot's edges: the scale is the current run's, whatever the other did.
+                    layer = Image.new("RGBA", (round((plot[2] - plot[0]) * over), round((plot[3] - plot[1]) * over)))
+                    reach = 4 * layer.height
+                    ImageDraw.Draw(layer).line([((across(at) - plot[0]) * over, max(-reach, min(reach, (up(value) - plot[1]) * over)))
+                                                for at, value in ghost], fill=EDGE, width=p(2) * over, joint="curve")
+                    sheet.paste(layer, (round(plot[0] * over), round(plot[1] * over)), layer)
                 path = [(across(at) * over, up(value) * over) for at, value in points]
                 if len(path) > 1:
                     pen.line(path, fill=ACCENT, width=p(2) * over, joint="curve")
@@ -1363,7 +1415,7 @@ class Visor:
                 pen.ellipse((x - dot, y - dot, x + dot, y + dot), fill=ACCENT)
 
             marks.append(curve)
-            self.run_plots.append({"card": (x0, y0, x0 + cell, y0 + tall), "plot": plot, "points": points, "across": across, "up": up})
+            self.run_plots.append({"name": name, "card": (x0, y0, x0 + cell, y0 + tall), "plot": plot, "points": points, "across": across, "up": up})
         if names:
             y += -(-len(names) // columns) * (tall + gap)
         if run["notes"]:
@@ -1438,6 +1490,14 @@ class Visor:
 
     def pan_start(self, event):
         self.canvas.focus_set()
+        if is_run(self.current):  # a click on a chart changes its scale: linear or logarithmic
+            for chart in self.run_plots:
+                left, top, right, bottom = chart["card"]
+                if left <= event.x <= right and top <= event.y <= bottom:
+                    self.log_scale ^= {chart["name"]}
+                    self.store.set_setting("log_scale", sorted(self.log_scale))
+                    self.draw()
+            return
         self.drag_origin = (event.x, event.y, self.pan.copy())
 
     def pan_move(self, event):
@@ -1464,6 +1524,10 @@ class Visor:
         target = max(0, min(len(self.items) - 1, index + direction))
         self.select(self.items[target])
         self.history_canvas.yview_moveto(target / max(1, len(self.items)))
+
+    def notify_changed(self):
+        self.notifying = self.notify.get()
+        self.store.set_setting("notify", self.notifying)
 
     def follow_changed(self):
         self.store.set_setting("follow", self.follow.get())
