@@ -146,7 +146,7 @@ The agents change nothing: they keep calling `visor show` and `visor track` on t
 
 ## Installation
 
-Linux with a graphical desktop, Python 3.10+, Tk and Pillow. PDFs also need `poppler-utils` (`pdfinfo` and `pdftoppm`), which most distributions ship. The question panel uses the local Codex server for Codex entries, or the `claude` command for Claude Code entries. The installer uses the libraries already on the system and downloads nothing.
+Linux with a graphical desktop, Python 3.10+, Tk and Pillow. PDFs also need `poppler-utils` (`pdfinfo` and `pdftoppm`), which most distributions ship. The question panel uses the local Codex server for Codex entries, or the `claude` command for Claude Code entries. The installer uses the libraries already on the system and downloads nothing, with one exception: when the Python is from a conda environment whose Tk is built without Xft (bitmap fonts, missing symbols), it asks whether to replace that Tk with the Xft build from conda-forge. `--fix-tk` replaces it without asking.
 
 ```bash
 python3 install.py

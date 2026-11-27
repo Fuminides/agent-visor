@@ -1905,6 +1905,19 @@ class InstallerTests(unittest.TestCase):
                 module.install(home, sys.executable)
             self.assertIn("another app", command.read_text())
 
+    def test_only_a_conda_tk_without_xft_is_reported(self):
+        spec = importlib.util.spec_from_file_location("visor_install", ROOT / "install.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(prefix="av-install-") as directory:
+            meta = Path(directory) / "conda-meta"
+            meta.mkdir()
+            self.assertIsNone(module.bitmap_tk(directory))  # not a conda environment, or one without Tk
+            (meta / "tk-8.6.13-xft_h9ebab88_4.json").write_text('{"name": "tk", "version": "8.6.13", "build": "xft_h9ebab88_4"}')
+            self.assertIsNone(module.bitmap_tk(directory))
+            (meta / "tk-8.6.13-xft_h9ebab88_4.json").write_text('{"name": "tk", "version": "8.6.13", "build": "noxft_hf03c496_4"}')
+            self.assertEqual(module.bitmap_tk(directory), "8.6.13")
+
     @unittest.skipUnless(graphical(), "No graphical desktop access")
     def test_shortcut_names_the_class_tk_gives_the_window(self):
         # GNOME puts the shortcut's icon on the window only when StartupWMClass is the window's class, letter for letter.

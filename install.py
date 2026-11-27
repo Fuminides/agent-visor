@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Install only the user-level command, skill links and desktop shortcut."""
 import argparse
+import json
+import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -41,14 +44,44 @@ def install(home, interpreter, desktop=True):
     print(f"Try: {command} demo")
 
 
+def bitmap_tk(prefix):
+    """The version of the Tk in a conda environment when it is the build without Xft, else None. That build only
+    has the old X bitmap fonts: the window's text comes out in a fallback face and its symbols have no glyph."""
+    for meta in Path(prefix).glob("conda-meta/tk-*.json"):
+        package = json.loads(meta.read_text())
+        if package["name"] == "tk" and package["build"].startswith("noxft"):
+            return package["version"]
+
+
+def fix_tk(interpreter, fix):
+    """Offer to replace a Tk without Xft with the build that has it; with fix, replace it without asking."""
+    prefix = subprocess.run([interpreter, "-c", "import sys; print(sys.prefix)"], capture_output=True, text=True, check=True).stdout.strip()
+    version = bitmap_tk(prefix)
+    if not version:
+        return
+    print(f"The Tk of {prefix} is built without Xft: Visor will show bitmap fonts and miss its symbols.")
+    tools = [os.environ.get("MAMBA_EXE"), os.environ.get("CONDA_EXE"), *map(shutil.which, ("micromamba", "mamba", "conda"))]
+    command = [next(filter(None, tools), "conda"), "install", "-y", "-p", prefix, "-c", "conda-forge", f"tk={version}=xft_*"]
+    if not fix and sys.stdin.isatty():
+        fix = input("Replace it with the Xft build from conda-forge (about 4 MB)? [Y/n] ").strip().lower() in ("", "y", "yes")
+    if not fix:
+        print(f"To fix it later: {shlex.join(command)}")
+        return
+    subprocess.run(command, check=True)
+    print("Tk replaced. Run `visor stop` if Visor is open; it uses the new Tk the next time it opens.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--no-desktop", action="store_true")
+    parser.add_argument("--fix-tk", action="store_true", help="replace a conda Tk built without Xft without asking")
     args = parser.parse_args()
     try:
-        install(args.home, str(Path(args.python).expanduser().absolute()), not args.no_desktop)
+        interpreter = str(Path(args.python).expanduser().absolute())
+        install(args.home, interpreter, not args.no_desktop)
+        fix_tk(interpreter, args.fix_tk)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"Install: {exc}", file=sys.stderr)
         return 1
